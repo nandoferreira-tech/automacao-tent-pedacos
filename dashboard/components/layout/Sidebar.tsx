@@ -4,10 +4,14 @@ import { usePathname } from 'next/navigation'
 import {
   Home, BarChart2, ShoppingBag, DollarSign,
   Star, Users, Megaphone, UtensilsCrossed, Settings, LogOut,
+  type LucideIcon,
 } from 'lucide-react'
 import { logout } from '@/app/actions/auth'
 
-const sections = [
+type NavItem = { href: string; label: string; icon: LucideIcon; placeholder?: boolean }
+type NavSection = { title?: string; items: NavItem[] }
+
+const sections: NavSection[] = [
   {
     items: [
       { href: '/pedidos', label: 'Início', icon: Home },
