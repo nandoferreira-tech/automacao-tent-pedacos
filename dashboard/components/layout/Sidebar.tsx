@@ -80,7 +80,7 @@ export function Sidebar() {
                 {section.title}
               </p>
             )}
-            {section.items.map(({ href, label, icon: Icon, placeholder }) => {
+            {section.items.map(({ href, label, icon: Icon, placeholder = false }) => {
               const active = isActive(href)
               return (
                 <Link
