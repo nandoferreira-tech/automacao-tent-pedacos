@@ -3,17 +3,15 @@ name: CI/CD — Agente WhatsApp
 on:
   push:
     branches:
-      - main       # → deploy produção
-      - develop    # → deploy homologação
+      - main
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Deploy Homologação (branch: develop)
+  # 1. Deploy Homologação — roda automaticamente
   # ---------------------------------------------------------------------------
   deploy-homolog:
     name: Deploy → Homologação
     runs-on: self-hosted
-    if: github.ref == 'refs/heads/develop'
     environment: homolog
 
     steps:
@@ -36,12 +34,12 @@ jobs:
         run: bash scripts/deploy.sh homolog
 
   # ---------------------------------------------------------------------------
-  # Deploy Produção (branch: main)
+  # 2. Deploy Produção — aguarda aprovação manual no GitHub
   # ---------------------------------------------------------------------------
   deploy-prod:
     name: Deploy → Produção
     runs-on: self-hosted
-    if: github.ref == 'refs/heads/main'
+    needs: deploy-homolog
     environment: prod
 
     steps:
