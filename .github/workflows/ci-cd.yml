@@ -12,7 +12,7 @@ jobs:
   # ---------------------------------------------------------------------------
   deploy-homolog:
     name: Deploy → Homologação
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.ref == 'refs/heads/develop'
     environment: homolog
 
@@ -26,27 +26,18 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Instalar dependências
-        run: npm ci
-
       - name: Type check
         run: npx tsc --noEmit
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            bash /srv/homolog/agente-wpp/scripts/deploy.sh homolog
+      - name: Deploy
+        run: bash scripts/deploy.sh homolog
 
   # ---------------------------------------------------------------------------
   # Deploy Produção (branch: main)
   # ---------------------------------------------------------------------------
   deploy-prod:
     name: Deploy → Produção
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: github.ref == 'refs/heads/main'
     environment: prod
 
@@ -60,17 +51,8 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Instalar dependências
-        run: npm ci
-
       - name: Type check
         run: npx tsc --noEmit
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            bash /srv/prod/agente-wpp/scripts/deploy.sh prod
+      - name: Deploy
+        run: bash scripts/deploy.sh prod
