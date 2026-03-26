@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch --env-file=.env src/index.ts",
     "simulate": "tsx --env-file=.env scripts/simulate.ts",
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/prompts && cp src/prompts/system.md dist/prompts/system.md",
     "db:migrate": "prisma migrate dev",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
