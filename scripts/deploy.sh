@@ -22,7 +22,7 @@ fi
 # Configuração por ambiente
 if [[ "$ENV" == "homolog" ]]; then
   DIR="/srv/homolog/agente-wpp"
-  BRANCH="develop"
+  BRANCH="main"
   PM2_AGENT="agente-homolog"
   PM2_DASHBOARD="dashboard-homolog"
 else
