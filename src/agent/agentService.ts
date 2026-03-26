@@ -48,8 +48,8 @@ export async function processMessage(
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
     contents,
-    tools: agentTools,
     config: {
+      tools: agentTools,
       systemInstruction: SYSTEM_PROMPT,
       temperature: 0.7,
       maxOutputTokens: 512,
