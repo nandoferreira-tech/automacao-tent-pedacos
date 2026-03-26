@@ -3,6 +3,7 @@ import { Inter } from 'next/font/google'
 import './globals.css'
 import { Providers } from '@/components/Providers'
 import { Sidebar } from '@/components/layout/Sidebar'
+import { WhatsAppStatus } from '@/components/layout/WhatsAppStatus'
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -22,6 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
           )}
           <Sidebar />
+          <WhatsAppStatus />
           <main className="ml-56 h-screen overflow-auto bg-background">
             {children}
           </main>

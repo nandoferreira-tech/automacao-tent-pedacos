@@ -8,7 +8,7 @@ import pkg from 'whatsapp-web.js'
 const { Client, LocalAuth, MessageMedia } = pkg
 import qrcode from 'qrcode-terminal'
 import type { WppClient, WppMessage, WppMedia, MessageHandler } from './types.js'
-import { startInternalServer, setWhatsAppClient } from '../server.js'
+import { startInternalServer, setWhatsAppClient, setWppStatus } from '../server.js'
 
 function adaptClient(raw: InstanceType<typeof Client>): WppClient {
   return {
@@ -50,6 +50,10 @@ export function startWwebjsAdapter(
   internalPort: number,
   onMessage: MessageHandler,
 ): void {
+  // Servidor interno sobe imediatamente para o endpoint /wpp-status estar disponível
+  // mesmo antes do WhatsApp conectar
+  startInternalServer(internalPort)
+
   const raw = new Client({
     authStrategy: new LocalAuth({ clientId: process.env['WPP_SESSION_NAME'] ?? 'agente-wpp' }),
     puppeteer: { headless: true, args: ['--no-sandbox'] },
@@ -59,13 +63,14 @@ export function startWwebjsAdapter(
   raw.on('qr', (qr) => {
     console.log('Escaneie o QR code abaixo com o WhatsApp:')
     qrcode.generate(qr, { small: true })
+    setWppStatus('qr', qr)
   })
 
   raw.on('ready', () => {
     console.log(`✓ Agente "${process.env['AGENT_NAME'] ?? 'Tentação em Pedaços'}" conectado (wwebjs).`)
     const client = adaptClient(raw)
     setWhatsAppClient(client)
-    startInternalServer(internalPort)
+    setWppStatus('connected')
   })
 
   raw.on('message', async (message) => {
@@ -76,6 +81,7 @@ export function startWwebjsAdapter(
 
   raw.on('disconnected', (reason) => {
     console.error('Desconectado:', reason)
+    setWppStatus('disconnected')
     process.exit(1)
   })
 
