@@ -3,7 +3,6 @@ import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { agentTools } from './tools.js'
-import { formatPixInstructions } from '../tools/pixService.js'
 import { validateDeliveryAddress } from '../tools/addressService.js'
 import { db } from '../lib/db.js'
 
@@ -21,7 +20,7 @@ const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
 export interface AgentResponse {
   text: string
   transferToAttendant?: boolean
-  orderCreated?: { orderId: string; total: number; paymentMethod: string }
+  orderCreated?: { orderId: string; orderNumber: number; total: number; paymentMethod: string }
 }
 
 /**
@@ -152,7 +151,7 @@ async function handleToolCall(
         }),
       )
 
-      // Cria o pedido
+      // Cria o pedido — aguardando aprovação da boleria
       const order = await db.order.create({
         data: {
           customerPhone,
@@ -163,32 +162,22 @@ async function handleToolCall(
           total: finalTotal,
           orderNumber,
           deliveryTime,
+          status: 'aguardando_aprovacao',
           items: { create: resolvedItems },
         },
       })
 
       const orderId = String(orderNumber)
 
-      if (paymentMethod === 'pix') {
-        const pixMsg = formatPixInstructions(Math.round(finalTotal * 100), orderId)
-        return {
-          text: `✅ Pedido *#${orderId}* registrado!\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`,
-          orderCreated: { orderId: String(order.id), total: finalTotal, paymentMethod },
-        }
-      }
-
-      const prazo = now.getHours() < CUTOFF_HOUR ? 'hoje à tarde 🌤️' : 'amanhã pela manhã ☀️'
       return {
         text: [
-          `✅ Pedido *#${orderId}* confirmado!`,
+          `🎂 Pedido *#${orderId}* recebido!`,
           '',
           `💵 Total: R$ ${finalTotal.toFixed(2).replace('.', ',')}`,
-          `💳 Pagamento: ${paymentMethod.includes('cartao') ? 'Cartão' : 'Dinheiro'} ${deliveryType === 'entrega' ? 'na entrega' : 'na retirada'}`,
-          `🕑 Previsão: ${prazo}`,
           '',
-          'Muito obrigada por comprar na *Tentação em Pedaços*! Vai ser uma delícia! 🎂❤️',
+          'Estamos confirmando sua disponibilidade com a equipe. Em instantes você receberá a confirmação! 😊',
         ].join('\n'),
-        orderCreated: { orderId: String(order.id), total: finalTotal, paymentMethod },
+        orderCreated: { orderId: String(order.id), orderNumber, total: finalTotal, paymentMethod },
       }
     }
 

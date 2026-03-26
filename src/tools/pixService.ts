@@ -36,6 +36,57 @@ export function formatPixInstructions(valueInCents: number, orderId: string): st
 }
 
 /**
+ * Formata o resumo do pedido enviado à boleria para aprovação.
+ */
+export function formatOrderSummaryForBakery(order: {
+  orderNumber: number
+  customerName: string
+  customerPhone: string
+  items: Array<{ quantity: number; unitPrice: number; product: { name: string } }>
+  total: number
+  deliveryType: string
+  address: string | null
+  paymentMethod: string
+}): string {
+  const paymentLabel =
+    order.paymentMethod === 'pix'
+      ? 'Pix — aguarde o comprovante'
+      : order.paymentMethod === 'cartao_entrega'
+        ? 'Cartão na entrega'
+        : 'Dinheiro na entrega'
+
+  const deliveryLabel =
+    order.deliveryType === 'entrega' ? `Entrega: ${order.address}` : 'Retirada na loja'
+
+  const itemsText = order.items
+    .map(
+      (i) =>
+        `  • ${i.product.name} x${i.quantity} — R$ ${(i.unitPrice * i.quantity).toFixed(2).replace('.', ',')}`,
+    )
+    .join('\n')
+
+  const totalFormatted = order.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+
+  return [
+    `### PEDIDO FEITO ## numero - ${order.orderNumber} ###`,
+    '',
+    `Cliente: ${order.customerName} (${order.customerPhone})`,
+    `Pedido:`,
+    itemsText,
+    `Total: ${totalFormatted}`,
+    deliveryLabel,
+    `Pagamento: ${paymentLabel}`,
+    '',
+    '##############################',
+    '',
+    'aceita pedido?',
+    '1 - sim / 2 - não',
+    '',
+    'caso não, informe o motivo na próxima mensagem',
+  ].join('\n')
+}
+
+/**
  * Retorna a mensagem encaminhada ao atendente com o comprovante do cliente.
  * Enviada de forma silenciosa — o cliente não vê.
  */

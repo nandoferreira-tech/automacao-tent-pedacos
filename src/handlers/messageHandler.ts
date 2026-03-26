@@ -1,11 +1,19 @@
 import type { WppClient, WppMessage } from '../adapters/types.js'
 import { processMessage } from '../agent/agentService.js'
-import { formatAttendantNotification } from '../tools/pixService.js'
+import {
+  formatAttendantNotification,
+  formatOrderSummaryForBakery,
+  formatPixInstructions,
+} from '../tools/pixService.js'
 import { db } from '../lib/db.js'
 
 const COMPANY_PHONE = process.env['COMPANY_PHONE'] ?? ''
+const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
 
 type HistoryEntry = { role: 'user' | 'model'; text: string }
+
+// Estado em memória: quando a boleria enviou "2", aguardamos o motivo da recusa
+let pendingRefusalOrderNumber: number | null = null
 
 async function loadHistory(phone: string): Promise<HistoryEntry[]> {
   const conv = await db.conversation.findUnique({ where: { phone } })
@@ -80,6 +88,10 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
 
     await message.reply(response.text)
 
+    if (response.orderCreated) {
+      await notifyBakeryNewOrder(client, response.orderCreated.orderNumber)
+    }
+
     if (response.transferToAttendant) {
       await notifyAttendant(client, phone, customerName, 'Cliente solicitou atendimento humano.')
     }
@@ -97,6 +109,32 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
       '5 - 👩 Falar com atendente',
     )
   }
+}
+
+/**
+ * Envia o resumo do novo pedido à boleria para aprovação.
+ */
+async function notifyBakeryNewOrder(client: WppClient, orderNumber: number): Promise<void> {
+  if (!COMPANY_PHONE) return
+
+  const order = await db.order.findFirst({
+    where: { orderNumber },
+    include: { items: { include: { product: true } } },
+  })
+  if (!order) return
+
+  const summary = formatOrderSummaryForBakery({
+    orderNumber: order.orderNumber!,
+    customerName: order.customerName,
+    customerPhone: order.customerPhone,
+    items: order.items,
+    total: order.total,
+    deliveryType: order.deliveryType,
+    address: order.address,
+    paymentMethod: order.paymentMethod,
+  })
+
+  await client.sendMessage(`${COMPANY_PHONE}@c.us`, summary)
 }
 
 /**
@@ -150,28 +188,154 @@ async function handleComprovante(client: WppClient, message: WppMessage, phone: 
 }
 
 /**
- * Atendente enviou comando de confirmação ou recusa de pedido.
+ * Boleria enviou mensagem — pode ser aprovação/recusa de pedido ou confirmação de Pix.
  */
 async function handleAttendantCommand(client: WppClient, message: WppMessage): Promise<void> {
-  const text = message.body.trim().toLowerCase()
+  const text = message.body.trim()
+  const lower = text.toLowerCase()
 
-  const confirmMatch = text.match(/^confirmar\s+(\S+)/)
-  const recusarMatch  = text.match(/^recusar\s+(\S+)/)
+  // Se estava aguardando motivo da recusa, qualquer texto livre é o motivo
+  if (pendingRefusalOrderNumber !== null) {
+    const isCommand = /^(1|2|confirmar|recusar)\b/.test(lower)
+    if (!isCommand) {
+      await rejectOrderWithReason(client, pendingRefusalOrderNumber, text)
+      pendingRefusalOrderNumber = null
+      return
+    }
+  }
+
+  // Aprovação do pedido
+  if (lower === '1') {
+    await acceptOrder(client)
+    return
+  }
+
+  // Início de recusa — pede motivo
+  if (lower === '2') {
+    const order = await db.order.findFirst({
+      where: { status: 'aguardando_aprovacao' },
+      orderBy: { createdAt: 'asc' },
+    })
+    if (!order?.orderNumber) {
+      await client.sendMessage(`${COMPANY_PHONE}@c.us`, 'Não há pedidos aguardando aprovação.')
+      return
+    }
+    pendingRefusalOrderNumber = order.orderNumber
+    await client.sendMessage(
+      `${COMPANY_PHONE}@c.us`,
+      `Ok! Qual o motivo da recusa do Pedido *#${order.orderNumber}*?\nDigite o motivo na próxima mensagem.`,
+    )
+    return
+  }
+
+  // Confirmação de comprovante Pix (fluxo existente)
+  const confirmMatch = lower.match(/^confirmar\s+(\S+)/)
+  const recusarMatch  = lower.match(/^recusar\s+(\S+)/)
 
   if (confirmMatch) {
     const orderId = confirmMatch[1] ?? ''
-    await confirmOrder(client, orderId)
+    await confirmPixPayment(client, orderId)
     return
   }
 
   if (recusarMatch) {
     const orderId = recusarMatch[1] ?? ''
-    await refuseOrder(client, orderId)
+    await refusePixPayment(client, orderId)
     return
   }
 }
 
-async function confirmOrder(client: WppClient, orderId: string): Promise<void> {
+/**
+ * Boleria aceitou o pedido mais antigo aguardando aprovação.
+ */
+async function acceptOrder(client: WppClient): Promise<void> {
+  const order = await db.order.findFirst({
+    where: { status: 'aguardando_aprovacao' },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  if (!order?.orderNumber) {
+    await client.sendMessage(`${COMPANY_PHONE}@c.us`, 'Não há pedidos aguardando aprovação.')
+    return
+  }
+
+  const orderId = String(order.orderNumber)
+
+  if (order.paymentMethod === 'pix') {
+    // Muda para aguardando pagamento e envia instruções Pix ao cliente
+    await db.order.update({
+      where: { id: order.id },
+      data: { status: 'aguardando_pagamento' },
+    })
+
+    const pixMsg = formatPixInstructions(Math.round(order.total * 100), orderId)
+    await client.sendMessage(
+      `${order.customerPhone}@c.us`,
+      `✅ *Pedido #${orderId} confirmado!*\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`,
+    )
+  } else {
+    // Cartão ou dinheiro na entrega — pedido entra em produção
+    await db.order.update({
+      where: { id: order.id },
+      data: { status: 'em_producao' },
+    })
+
+    const now = new Date()
+    const prazo = order.deliveryTime.getDate() === now.getDate()
+      ? 'hoje à tarde 🌤️'
+      : 'amanhã pela manhã ☀️'
+
+    const paymentLabel = order.paymentMethod === 'cartao_entrega' ? 'Cartão' : 'Dinheiro'
+    const deliveryLabel = order.deliveryType === 'entrega' ? 'na entrega' : 'na retirada'
+
+    await client.sendMessage(
+      `${order.customerPhone}@c.us`,
+      [
+        `✅ *Pedido #${orderId} confirmado!*`,
+        '',
+        `💵 Total: R$ ${order.total.toFixed(2).replace('.', ',')}`,
+        `💳 Pagamento: ${paymentLabel} ${deliveryLabel}`,
+        `🕑 Previsão: ${prazo}`,
+        '',
+        'Muito obrigada por comprar na *Tentação em Pedaços*! Vai ser uma delícia! 🎂❤️',
+      ].join('\n'),
+    )
+  }
+
+  await client.sendMessage(`${COMPANY_PHONE}@c.us`, `✅ Pedido *#${orderId}* aceito!`)
+}
+
+/**
+ * Boleria recusou o pedido com um motivo.
+ */
+async function rejectOrderWithReason(
+  client: WppClient,
+  orderNumber: number,
+  reason: string,
+): Promise<void> {
+  const order = await db.order.findFirst({ where: { orderNumber } })
+  if (!order) {
+    console.warn(`[pedido] Pedido #${orderNumber} não encontrado.`)
+    return
+  }
+
+  await db.order.update({
+    where: { id: order.id },
+    data: { status: 'cancelado', notaInterna: reason },
+  })
+
+  await client.sendMessage(
+    `${order.customerPhone}@c.us`,
+    `😔 Infelizmente não podemos confirmar o Pedido *#${orderNumber}* no momento.\n\n*Motivo:* ${reason}\n\nSe quiser fazer um novo pedido ou precisar de ajuda, é só chamar! 💜`,
+  )
+
+  await client.sendMessage(`${COMPANY_PHONE}@c.us`, `❌ Pedido *#${orderNumber}* recusado. Cliente notificado.`)
+}
+
+/**
+ * Boleria confirmou o comprovante Pix (fluxo existente).
+ */
+async function confirmPixPayment(client: WppClient, orderId: string): Promise<void> {
   const order = await db.order.findFirst({
     where: { orderNumber: Number(orderId) },
   })
@@ -191,7 +355,10 @@ async function confirmOrder(client: WppClient, orderId: string): Promise<void> {
   )
 }
 
-async function refuseOrder(client: WppClient, orderId: string): Promise<void> {
+/**
+ * Boleria recusou o comprovante Pix (fluxo existente).
+ */
+async function refusePixPayment(client: WppClient, orderId: string): Promise<void> {
   const order = await db.order.findFirst({
     where: { orderNumber: Number(orderId) },
   })
