@@ -1,0 +1,97 @@
+// Schema local do dashboard — mantido em sync com ../prisma/schema.prisma
+// Gera o Prisma Client localmente para o Next.js conseguir resolver os imports
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// Cliente — identificado pelo número de WhatsApp
+model Customer {
+  phone        String    @id
+  name         String
+  email        String?
+  birthDate    DateTime?
+  neighborhood String?
+  city         String?
+  cep          String?
+  howFound     String?
+  points       Int       @default(0)
+  createdAt    DateTime  @default(now())
+
+  orders      Order[]
+  loyaltyTxns LoyaltyTransaction[]
+}
+
+// Produto do cardápio
+model Product {
+  id          String  @id @default(cuid())
+  category    String
+  subcategory String?
+  name        String
+  description String?
+  price       Float
+  isAddon     Boolean @default(false)
+  available   Boolean @default(true)
+
+  orderItems OrderItem[]
+}
+
+// Pedido
+model Order {
+  id                String    @id @default(cuid())
+  customerPhone     String
+  customerName      String
+  deliveryType      String
+  address           String?
+  status            String    @default("aguardando_pagamento")
+  paymentMethod     String
+  pixCode           String?
+  pixQr             String?
+  total             Float
+  orderNumber       Int?
+  comprovanteUrl    String?
+  comprovanteStatus String?
+  notaInterna       String?
+  deliveryTime      DateTime
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  customer Customer  @relation(fields: [customerPhone], references: [phone])
+  items    OrderItem[]
+}
+
+// Itens do pedido
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  unitPrice Float
+
+  order   Order   @relation(fields: [orderId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
+
+// Histórico de pontos de fidelidade
+model LoyaltyTransaction {
+  id          String   @id @default(cuid())
+  phone       String
+  points      Int
+  description String
+  createdAt   DateTime @default(now())
+
+  customer Customer @relation(fields: [phone], references: [phone])
+}
+
+// Estado da conversa ativa
+model Conversation {
+  phone     String   @id
+  state     String   @default("idle")
+  context   String   @default("{}")
+  updatedAt DateTime @updatedAt
+}
