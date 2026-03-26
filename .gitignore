@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.local
+.wpp-session/
+.wwebjs_auth/
+.wwebjs_cache/
+*.log
+dev.db
+dev.db-journal
+
+/src/generated/prisma
+/dashboard/lib/generated/
+/dist/

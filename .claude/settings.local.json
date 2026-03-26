@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init -y)",
+      "Bash(npx tsc --init)",
+      "Bash(npx prisma:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm list:*)",
+      "Bash(find '/c/Users/manutencao/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp/dashboard' -not -path */node_modules/* -not -path */.next/* -not -path */.git/* -type d)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
