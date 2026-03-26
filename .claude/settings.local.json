@@ -8,7 +8,14 @@
       "Bash(npm install:*)",
       "Bash(npx tsc:*)",
       "Bash(npm list:*)",
-      "Bash(find '/c/Users/manutencao/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp/dashboard' -not -path */node_modules/* -not -path */.next/* -not -path */.git/* -type d)"
+      "Bash(find '/c/Users/manutencao/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp/dashboard' -not -path */node_modules/* -not -path */.next/* -not -path */.git/* -type d)",
+      "Bash(find '/c/Users/fernando.salvia/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp' -not -path */.git/* -type d)",
+      "Bash(find '/c/Users/fernando.salvia/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp/dashboard' -maxdepth 2 -type f ! -path */.next/* ! -path */node_modules/*)",
+      "Bash(find '/c/Users/fernando.salvia/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp' -maxdepth 1 -type f ! -path */.git/* ! -path */node_modules/*)",
+      "Bash(find '/c/Users/fernando.salvia/OneDrive -/Área de Trabalho/docs fernando/Projetos/agente wpp' -maxdepth 3 -type f \\\\\\(-name prisma.schema -o -name schema.prisma -o -name .github -o -name Dockerfile* -o -name docker-compose* -o -name *.yml -o -name *.yaml \\\\\\))",
+      "Bash(/tmp/tree.txt:*)",
+      "Read(//tmp/**)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

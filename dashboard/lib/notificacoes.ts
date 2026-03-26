@@ -11,7 +11,7 @@ export async function notificarCliente(phone: string, name: string, status: stri
   const msg = MENSAGENS[status]
   if (!msg) return
   try {
-    await fetch('http://localhost:3001/internal/send', {
+    await fetch(`${process.env['AGENT_INTERNAL_URL'] ?? 'http://localhost:3001'}/internal/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone, mensagem: `Olá, ${name}! ${msg}` }),

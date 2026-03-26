@@ -32,8 +32,12 @@ export const agentTools: Tool[] = [
             address:         { type: Type.STRING, description: 'Endereço de entrega (se deliveryType=entrega)' },
             paymentMethod:   { type: Type.STRING, description: '"pix" | "cartao_entrega" | "dinheiro_entrega"' },
             total:           { type: Type.NUMBER, description: 'Valor total do pedido em reais' },
+            coberturaEscolhida: {
+              type: Type.STRING,
+              description: 'Cobertura para Bolo Artesanal Tradicional. Use o nome exato ("Chocolate", "Brigadeiro de paçoca", "Casquinha de limão/Laranja", "Brigadeiro branco/preto", "Geléia de goiaba", "Beijinho"), ou "sem cobertura" se o cliente recusou, ou "nao_aplicavel" se o pedido não contém Bolos Artesanais Tradicionais.',
+            },
           },
-          required: ['customerPhone', 'customerName', 'items', 'deliveryType', 'paymentMethod', 'total'],
+          required: ['customerPhone', 'customerName', 'items', 'deliveryType', 'paymentMethod', 'total', 'coberturaEscolhida'],
         },
       },
       {
@@ -67,6 +71,17 @@ export const agentTools: Tool[] = [
             customerPhone: { type: Type.STRING, description: 'Número do cliente' },
           },
           required: ['customerPhone'],
+        },
+      },
+      {
+        name: 'validarEnderecoEntrega',
+        description: 'Valida se o endereço do cliente está dentro da área de entrega. Chame assim que o cliente informar o endereço completo (rua, número e bairro).',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            address: { type: Type.STRING, description: 'Endereço completo informado pelo cliente (rua, número e bairro)' },
+          },
+          required: ['address'],
         },
       },
       {

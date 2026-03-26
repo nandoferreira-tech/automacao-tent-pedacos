@@ -4,6 +4,7 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { agentTools } from './tools.js'
 import { formatPixInstructions } from '../tools/pixService.js'
+import { validateDeliveryAddress } from '../tools/addressService.js'
 import { db } from '../lib/db.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -86,16 +87,30 @@ async function handleToolCall(
   switch (toolName) {
 
     case 'criarPedido': {
-      const total         = Number(args['total'] ?? 0)
-      const paymentMethod = String(args['paymentMethod'] ?? '')
-      const deliveryType  = String(args['deliveryType'] ?? 'retirada')
-      const address       = args['address'] ? String(args['address']) : null
-      const name          = String(args['customerName'] ?? customerName)
+      const paymentMethod      = String(args['paymentMethod'] ?? '')
+      const deliveryType       = String(args['deliveryType'] ?? 'retirada')
+      const address            = args['address'] ? String(args['address']) : null
+      const name               = String(args['customerName'] ?? customerName)
+      const coberturaEscolhida = args['coberturaEscolhida'] ? String(args['coberturaEscolhida']) : null
       const items = (args['items'] ?? []) as Array<{
         productName: string
         quantity: number
         unitPrice: number
       }>
+
+      // Guard: se há Bolo Artesanal Tradicional (R$25) sem cobertura definida, recusa a criação
+      const temTradicional = items.some((i) => i.unitPrice === 25)
+      if (temTradicional && !coberturaEscolhida) {
+        return { text: 'Preciso confirmar a cobertura antes de registrar o pedido. Por favor, pergunte ao cliente sobre a cobertura.' }
+      }
+
+      // Append cobertura como item se o cliente escolheu uma
+      if (coberturaEscolhida && coberturaEscolhida !== 'sem cobertura' && coberturaEscolhida !== 'nao_aplicavel') {
+        items.push({ productName: `Cobertura ${coberturaEscolhida}`, quantity: 1, unitPrice: 8.75 })
+      }
+
+      // Recalcula total a partir dos itens para garantir consistência
+      const finalTotal = items.reduce((acc, i) => acc + i.unitPrice * i.quantity, 0)
 
       // Calcula horário de entrega
       const now = new Date()
@@ -145,7 +160,7 @@ async function handleToolCall(
           deliveryType,
           address,
           paymentMethod,
-          total,
+          total: finalTotal,
           orderNumber,
           deliveryTime,
           items: { create: resolvedItems },
@@ -155,10 +170,10 @@ async function handleToolCall(
       const orderId = String(orderNumber)
 
       if (paymentMethod === 'pix') {
-        const pixMsg = formatPixInstructions(Math.round(total * 100), orderId)
+        const pixMsg = formatPixInstructions(Math.round(finalTotal * 100), orderId)
         return {
           text: `✅ Pedido *#${orderId}* registrado!\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`,
-          orderCreated: { orderId: String(order.id), total, paymentMethod },
+          orderCreated: { orderId: String(order.id), total: finalTotal, paymentMethod },
         }
       }
 
@@ -167,13 +182,42 @@ async function handleToolCall(
         text: [
           `✅ Pedido *#${orderId}* confirmado!`,
           '',
-          `💵 Total: R$ ${total.toFixed(2).replace('.', ',')}`,
+          `💵 Total: R$ ${finalTotal.toFixed(2).replace('.', ',')}`,
           `💳 Pagamento: ${paymentMethod.includes('cartao') ? 'Cartão' : 'Dinheiro'} ${deliveryType === 'entrega' ? 'na entrega' : 'na retirada'}`,
           `🕑 Previsão: ${prazo}`,
           '',
           'Muito obrigada por comprar na *Tentação em Pedaços*! Vai ser uma delícia! 🎂❤️',
         ].join('\n'),
-        orderCreated: { orderId: String(order.id), total, paymentMethod },
+        orderCreated: { orderId: String(order.id), total: finalTotal, paymentMethod },
+      }
+    }
+
+    case 'validarEnderecoEntrega': {
+      const address = String(args['address'] ?? '')
+      const result = await validateDeliveryAddress(address)
+
+      if (result.error === 'Endereço não encontrado') {
+        return {
+          text: 'Hmm, não consegui localizar esse endereço no mapa. 🗺️\n\nPode conferir se está correto? Me passa a rua, número e bairro novamente. 😊',
+        }
+      }
+
+      if (!result.valid) {
+        return {
+          text: [
+            `Que pena! 😔 Infelizmente o endereço *${result.formattedAddress}* está fora da nossa área de entrega (${result.distanceKm} km da loja).`,
+            '',
+            'Mas não precisa ficar sem seu bolinho! Você pode retirar na loja:',
+            '📍 *Rua Padre Carvalho, 388*',
+            'https://maps.google.com/?q=Rua+Padre+Carvalho,+388,+São+Paulo',
+            '',
+            'Deseja fazer a retirada? 😊',
+          ].join('\n'),
+        }
+      }
+
+      return {
+        text: `✅ Ótimo! Entregamos no endereço *${result.formattedAddress}* (${result.distanceKm} km da loja). Pode confirmar? 😊`,
       }
     }
 

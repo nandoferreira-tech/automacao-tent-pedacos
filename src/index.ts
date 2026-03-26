@@ -1,35 +1,24 @@
 import 'dotenv/config'
-import { setWhatsAppClient, startInternalServer } from './server.js'
-import pkg from 'whatsapp-web.js'
-const { Client, LocalAuth } = pkg
-import qrcode from 'qrcode-terminal'
 import { handleMessage } from './handlers/messageHandler.js'
+import { startInternalServer } from './server.js'
 
-const client = new Client({
-  authStrategy: new LocalAuth({ clientId: process.env['WPP_SESSION_NAME'] ?? 'agente-wpp' }),
-  puppeteer: { headless: true, args: ['--no-sandbox'] },
-  qrMaxRetries: 15, // ~5 minutos (cada QR expira em ~20s)
-})
+const PROVIDER     = process.env['WHATSAPP_PROVIDER'] ?? 'wwebjs'
+const WPP_ENABLED  = process.env['WPP_ENABLED'] !== 'false'
+const internalPort = Number(process.env['INTERNAL_PORT'] ?? 3001)
+const webhookPort  = Number(process.env['EVOLUTION_WEBHOOK_PORT'] ?? 3002)
 
-client.on('qr', (qr) => {
-  console.log('Escaneie o QR code abaixo com o WhatsApp:')
-  qrcode.generate(qr, { small: true })
-})
+if (!WPP_ENABLED) {
+  // Modo homologação: sobe apenas o servidor interno (dashboard funciona normalmente)
+  // sem conectar ao WhatsApp — evita conflito de sessão com produção.
+  console.log('⚠  WPP_ENABLED=false — rodando sem WhatsApp (modo homolog).')
+  startInternalServer(internalPort)
 
-client.on('ready', () => {
-  console.log(`✓ Agente "${process.env['AGENT_NAME'] ?? 'Tentação em Pedaços'}" conectado.`)
-  setWhatsAppClient(client)
-  startInternalServer()
-})
+} else if (PROVIDER === 'evolution') {
+  const { startEvolutionAdapter } = await import('./adapters/EvolutionApiAdapter.js')
+  startEvolutionAdapter(internalPort, webhookPort, handleMessage)
 
-client.on('message', async (message) => {
-  if (message.from.endsWith('@g.us')) return
-  await handleMessage(client, message)
-})
-
-client.on('disconnected', (reason) => {
-  console.error('Desconectado:', reason)
-  process.exit(1)
-})
-
-client.initialize()
+} else {
+  // Padrão: whatsapp-web.js
+  const { startWwebjsAdapter } = await import('./adapters/WwebjsAdapter.js')
+  startWwebjsAdapter(internalPort, handleMessage)
+}

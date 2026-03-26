@@ -1,0 +1,76 @@
+name: CI/CD — Agente WhatsApp
+
+on:
+  push:
+    branches:
+      - main       # → deploy produção
+      - develop    # → deploy homologação
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Deploy Homologação (branch: develop)
+  # ---------------------------------------------------------------------------
+  deploy-homolog:
+    name: Deploy → Homologação
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    environment: homolog
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            bash /srv/homolog/agente-wpp/scripts/deploy.sh homolog
+
+  # ---------------------------------------------------------------------------
+  # Deploy Produção (branch: main)
+  # ---------------------------------------------------------------------------
+  deploy-prod:
+    name: Deploy → Produção
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            bash /srv/prod/agente-wpp/scripts/deploy.sh prod

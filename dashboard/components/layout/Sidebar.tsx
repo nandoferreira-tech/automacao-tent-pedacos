@@ -3,8 +3,9 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   Home, BarChart2, ShoppingBag, DollarSign,
-  Star, Users, Megaphone, UtensilsCrossed, Settings,
+  Star, Users, Megaphone, UtensilsCrossed, Settings, LogOut,
 } from 'lucide-react'
+import { logout } from '@/app/actions/auth'
 
 const sections = [
   {
@@ -102,6 +103,17 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
+
+      {/* Logout */}
+      <form action={logout} className="p-3 border-t border-border shrink-0">
+        <button
+          type="submit"
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-[13px] font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+        >
+          <LogOut size={17} strokeWidth={1.8} />
+          Sair
+        </button>
+      </form>
     </aside>
   )
 }

@@ -98,5 +98,6 @@ model Conversation {
   state     String   @default("idle")
   // idle | menu | pedido_categoria | pedido_produto | pedido_entrega | pedido_pagamento | cadastro
   context   String   @default("{}") // JSON serializado com dados parciais da conversa
+  history   String   @default("[]") // JSON: Array<{ role: 'user' | 'model'; text: string }>
   updatedAt DateTime @updatedAt
 }

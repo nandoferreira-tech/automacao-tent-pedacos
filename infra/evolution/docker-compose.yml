@@ -1,0 +1,38 @@
+# Evolution API — provedor WhatsApp alternativo (baileys gratuito ou Meta Cloud API)
+#
+# Para subir:
+#   docker compose up -d
+#
+# Painel de gerenciamento: http://<vm-ip>:8080
+# Documentação: https://doc.evolution-api.com
+
+services:
+  evolution-api:
+    image: atendai/evolution-api:latest
+    container_name: evolution-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - evolution_instances:/evolution/instances
+      - evolution_store:/evolution/store
+    environment:
+      # Autenticação global da API
+      AUTHENTICATION_TYPE: apikey
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-troque-esta-chave}
+
+      # Armazenamento de sessões
+      STORE_MESSAGES: "true"
+      STORE_MESSAGE_UP: "true"
+
+      # Log
+      LOG_LEVEL: ERROR
+      LOG_COLOR: "true"
+
+      # Webhook global (opcional — cada instância pode ter o seu)
+      # WEBHOOK_GLOBAL_URL: http://host.docker.internal:3002/webhook
+      # WEBHOOK_GLOBAL_ENABLED: "true"
+
+volumes:
+  evolution_instances:
+  evolution_store:

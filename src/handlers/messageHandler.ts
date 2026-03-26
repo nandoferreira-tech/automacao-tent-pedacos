@@ -1,19 +1,34 @@
-import type { Client, Message } from 'whatsapp-web.js'
+import type { WppClient, WppMessage } from '../adapters/types.js'
 import { processMessage } from '../agent/agentService.js'
 import { formatAttendantNotification } from '../tools/pixService.js'
 import { db } from '../lib/db.js'
 
 const COMPANY_PHONE = process.env['COMPANY_PHONE'] ?? ''
 
-// Histórico em memória por sessão (substituir por banco em v2)
-const sessionHistory = new Map<string, Array<{ role: 'user' | 'model'; text: string }>>()
-// Mapa de clientes aguardando comprovante: phone → { orderId, total }
-const awaitingComprovante = new Map<string, { orderId: string; total: number; name: string }>()
+type HistoryEntry = { role: 'user' | 'model'; text: string }
+
+async function loadHistory(phone: string): Promise<HistoryEntry[]> {
+  const conv = await db.conversation.findUnique({ where: { phone } })
+  if (!conv) return []
+  try {
+    return JSON.parse(conv.history) as HistoryEntry[]
+  } catch {
+    return []
+  }
+}
+
+async function saveHistory(phone: string, history: HistoryEntry[]): Promise<void> {
+  await db.conversation.upsert({
+    where: { phone },
+    create: { phone, history: JSON.stringify(history) },
+    update: { history: JSON.stringify(history) },
+  })
+}
 
 /**
  * Ponto de entrada para todas as mensagens recebidas.
  */
-export async function handleMessage(client: Client, message: Message): Promise<void> {
+export async function handleMessage(client: WppClient, message: WppMessage): Promise<void> {
   const phone = message.from.replace('@c.us', '')
   const isCompany = phone === COMPANY_PHONE
 
@@ -33,7 +48,7 @@ export async function handleMessage(client: Client, message: Message): Promise<v
 /**
  * Mensagem de texto do cliente — processa via Gemini.
  */
-async function handleTextMessage(client: Client, message: Message, phone: string): Promise<void> {
+async function handleTextMessage(client: WppClient, message: WppMessage, phone: string): Promise<void> {
   const text = message.body.trim()
 
   // Mensagem vazia — cliente abriu a conversa sem digitar nada
@@ -50,43 +65,28 @@ async function handleTextMessage(client: Client, message: Message, phone: string
     return
   }
 
-  // Recupera ou inicia histórico da sessão
-  const history = sessionHistory.get(phone) ?? []
+  const history = await loadHistory(phone)
 
   try {
-    // Nome do contato (fallback para número)
     const contact = await message.getContact()
     const customerName = contact.pushname || phone
 
     const response = await processMessage(phone, customerName, text, history)
 
-    // Atualiza histórico (mantém últimas 20 mensagens para controle de tokens)
     history.push({ role: 'user', text })
     history.push({ role: 'model', text: response.text })
     if (history.length > 20) history.splice(0, 2)
-    sessionHistory.set(phone, history)
+    await saveHistory(phone, history)
 
-    // Envia resposta ao cliente
     await message.reply(response.text)
 
-    // Pedido criado via Pix → registra que cliente deve enviar comprovante
-    if (response.orderCreated?.paymentMethod === 'pix') {
-      awaitingComprovante.set(phone, {
-        orderId: response.orderCreated.orderId,
-        total: response.orderCreated.total,
-        name: customerName,
-      })
-    }
-
-    // Transferência para atendente → notifica empresa
     if (response.transferToAttendant) {
       await notifyAttendant(client, phone, customerName, 'Cliente solicitou atendimento humano.')
     }
 
   } catch (err) {
     console.error(`[messageHandler] Erro ao processar mensagem de ${phone}:`, err)
-    sessionHistory.delete(phone)
-    awaitingComprovante.delete(phone)
+    await saveHistory(phone, [])
     await message.reply(
       'Opa, tive um probleminha técnico aqui! 😅\n\n' +
       'Já reiniciei nossa conversa. O que posso fazer por você? É só digitar o número:\n\n' +
@@ -102,10 +102,17 @@ async function handleTextMessage(client: Client, message: Message, phone: string
 /**
  * Cliente enviou arquivo — trata como comprovante Pix.
  */
-async function handleComprovante(client: Client, message: Message, phone: string): Promise<void> {
-  const pending = awaitingComprovante.get(phone)
+async function handleComprovante(client: WppClient, message: WppMessage, phone: string): Promise<void> {
+  const order = await db.order.findFirst({
+    where: {
+      customerPhone: phone,
+      paymentMethod: 'pix',
+      status: 'aguardando_pagamento',
+    },
+    orderBy: { createdAt: 'desc' },
+  })
 
-  if (!pending) {
+  if (!order?.orderNumber) {
     await message.reply(
       'Não encontrei nenhum pedido aguardando pagamento. ' +
       'Se precisar de ajuda, é só chamar! 😊',
@@ -113,11 +120,12 @@ async function handleComprovante(client: Client, message: Message, phone: string
     return
   }
 
+  const orderId = String(order.orderNumber)
   const notification = formatAttendantNotification(
     phone,
-    pending.name,
-    pending.orderId,
-    Math.round(pending.total * 100),
+    order.customerName,
+    orderId,
+    Math.round(order.total * 100),
   )
 
   const companyContact = `${COMPANY_PHONE}@c.us`
@@ -126,13 +134,12 @@ async function handleComprovante(client: Client, message: Message, phone: string
   const media = await message.downloadMedia()
   if (media) {
     await client.sendMessage(companyContact, media, {
-      caption: `Comprovante de ${pending.name} (${phone}) — Pedido #${pending.orderId}`,
+      caption: `Comprovante de ${order.customerName} (${phone}) — Pedido #${orderId}`,
     })
   }
 
-  // Marca comprovante como pendente no banco
-  await db.order.updateMany({
-    where: { orderNumber: Number(pending.orderId), customerPhone: phone },
+  await db.order.update({
+    where: { id: order.id },
     data: { comprovanteStatus: 'pendente' },
   })
 
@@ -145,7 +152,7 @@ async function handleComprovante(client: Client, message: Message, phone: string
 /**
  * Atendente enviou comando de confirmação ou recusa de pedido.
  */
-async function handleAttendantCommand(client: Client, message: Message): Promise<void> {
+async function handleAttendantCommand(client: WppClient, message: WppMessage): Promise<void> {
   const text = message.body.trim().toLowerCase()
 
   const confirmMatch = text.match(/^confirmar\s+(\S+)/)
@@ -164,7 +171,7 @@ async function handleAttendantCommand(client: Client, message: Message): Promise
   }
 }
 
-async function confirmOrder(client: Client, orderId: string): Promise<void> {
+async function confirmOrder(client: WppClient, orderId: string): Promise<void> {
   const order = await db.order.findFirst({
     where: { orderNumber: Number(orderId) },
   })
@@ -184,7 +191,7 @@ async function confirmOrder(client: Client, orderId: string): Promise<void> {
   )
 }
 
-async function refuseOrder(client: Client, orderId: string): Promise<void> {
+async function refuseOrder(client: WppClient, orderId: string): Promise<void> {
   const order = await db.order.findFirst({
     where: { orderNumber: Number(orderId) },
   })
@@ -205,7 +212,7 @@ async function refuseOrder(client: Client, orderId: string): Promise<void> {
 }
 
 async function notifyAttendant(
-  client: Client,
+  client: WppClient,
   customerPhone: string,
   customerName: string,
   reason: string,

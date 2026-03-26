@@ -1,6 +1,6 @@
 import { createServer } from 'http'
+import type { WppClient } from './adapters/types.js'
 
-type WppClient = { sendMessage: (to: string, msg: string) => Promise<unknown> }
 let wppClient: WppClient | null = null
 
 export function setWhatsAppClient(client: WppClient) {
