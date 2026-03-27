@@ -11,3 +11,4 @@ dev.db-journal
 /src/generated/prisma
 /dashboard/lib/generated/
 /dist/
+build_out.txt
