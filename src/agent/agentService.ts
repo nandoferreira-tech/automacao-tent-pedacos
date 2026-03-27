@@ -35,6 +35,11 @@ export async function processMessage(
   currentStage?: string,
 ): Promise<AgentResponse> {
 
+  // Injeta nome do cliente para o LLM nunca pedir novamente
+  const customerContext = customerName && customerName !== customerPhone
+    ? `\n\n## Cliente atual\nNome: ${customerName} — o nome já foi coletado, NÃO pergunte novamente.\n`
+    : ''
+
   const stageContext = currentStage
     ? `\n\n## Etapa atual: ${currentStage}\n`
     : ''
@@ -55,7 +60,7 @@ export async function processMessage(
     contents,
     config: {
       tools: agentTools,
-      systemInstruction: SYSTEM_PROMPT + stageContext,
+      systemInstruction: SYSTEM_PROMPT + customerContext + stageContext,
       temperature: 0.7,
       maxOutputTokens: 512,
     },

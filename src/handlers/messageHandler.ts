@@ -127,6 +127,11 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
       '4 - ⭐ Programa de fidelidade\n' +
       '5 - 👩 Falar com atendente'
     await message.reply(replyText)
+    // Salva no histórico para o LLM ter contexto do nome já fornecido
+    const history = await loadHistory(phone)
+    history.push({ role: 'user', text: name })
+    history.push({ role: 'model', text: replyText })
+    await saveHistory(phone, history)
     setInactivityTimers(client, phone, name)
     return
   }
@@ -145,13 +150,23 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
         '4 - ⭐ Programa de fidelidade\n' +
         '5 - 👩 Falar com atendente'
       await message.reply(replyText)
+      // Salva no histórico para o LLM ter contexto do retorno
+      const history = await loadHistory(phone)
+      history.push({ role: 'user', text: text || 'Oi' })
+      history.push({ role: 'model', text: replyText })
+      await saveHistory(phone, history)
       setInactivityTimers(client, phone, existingCustomer.name)
     } else {
       stageMap.set(phone, 'awaiting_name')
-      await message.reply(
+      const welcomeText =
         'Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\n' +
-        'Antes de tudo, pode me dizer seu *nome*? 😊',
-      )
+        'Antes de tudo, pode me dizer seu *nome*? 😊'
+      await message.reply(welcomeText)
+      // Salva no histórico
+      const history = await loadHistory(phone)
+      history.push({ role: 'user', text: text || 'Oi' })
+      history.push({ role: 'model', text: welcomeText })
+      await saveHistory(phone, history)
       setInactivityTimers(client, phone, 'você')
     }
     return
