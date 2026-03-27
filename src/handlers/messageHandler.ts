@@ -329,6 +329,24 @@ async function handleNew(client: WppClient, message: WppMessage, phone: string, 
   startTimers(client, phone, customerName)
 }
 
+function matchProductFromText(text: string): ({ name: string; price: number; category: 'pote' | 'tradicional' | 'especial' }) | null {
+  const t = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  const normalize = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+
+  for (const p of POTE) {
+    const key = normalize(p.name.replace('Bolo no Pote de ', '').replace('Bolo no Pote ', ''))
+    if (t.includes(key)) return { ...p, category: 'pote' }
+  }
+  for (const p of ESPECIAL) {
+    if (t.includes(normalize(p.name))) return { ...p, category: 'especial' }
+  }
+  for (const p of TRADICIONAL) {
+    const key = normalize(p.name.replace('Bolo de ', '').replace('Bolo ', ''))
+    if (t.includes(key)) return { ...p, category: 'tradicional' }
+  }
+  return null
+}
+
 async function handleMainMenu(client: WppClient, message: WppMessage, phone: string, text: string, customerName: string | undefined) {
   if (!customerName) {
     await setState(phone, 'awaiting_name', emptyCtx())
@@ -339,9 +357,6 @@ async function handleMainMenu(client: WppClient, message: WppMessage, phone: str
 
   switch (text) {
     case '1':
-      await message.reply(FULL_CARDAPIO)
-      startTimers(client, phone, customerName)
-      break
     case '2':
       await setState(phone, 'category_select', emptyCtx())
       await message.reply(CATEGORY_MENU)
@@ -362,9 +377,38 @@ async function handleMainMenu(client: WppClient, message: WppMessage, phone: str
         await client.sendMessage(`${COMPANY_PHONE}@c.us`, `🙋 *Atendimento solicitado*\n\nCliente: ${customerName} (${phone})\nMotivo: Solicitou atendimento humano`)
       }
       break
-    default:
-      await message.reply(`Por favor, escolha uma das opções:\n\n${MAIN_MENU(first)}`)
-      startTimers(client, phone, customerName)
+    default: {
+      // Tenta identificar produto pelo texto livre antes de repetir o menu
+      const matched = matchProductFromText(text)
+      if (matched) {
+        const newCtx = emptyCtx()
+        newCtx.draft.productName = matched.name
+        newCtx.draft.productPrice = matched.price
+        if (matched.category === 'pote') {
+          newCtx.draft.coberturaName = null
+          newCtx.draft.coberturaPrice = 0
+          await setState(phone, 'delivery_type', newCtx)
+          await message.reply(
+            `Boa escolha, *${first}*! 😋\n\n` +
+            `Como você prefere receber seu *${matched.name}*?\n\n` +
+            '1 - 🏠 Entrega\n' +
+            '2 - 🏪 Retirada na loja'
+          )
+        } else {
+          await setState(phone, 'cobertura', newCtx)
+          await message.reply(`Boa escolha, *${first}*! 😋\n\n${COBERTURA_MENU}`)
+        }
+        startTimers(client, phone, customerName)
+      } else if (/\b(bolo|pote|quero|pedido|comprar|encomendar)\b/i.test(text)) {
+        // Intenção de pedido mas produto não identificado → vai para seleção de categoria
+        await setState(phone, 'category_select', emptyCtx())
+        await message.reply(`Não encontrei esse produto no cardápio. 😊 Veja as categorias disponíveis:\n\n${CATEGORY_MENU}`)
+        startTimers(client, phone, customerName)
+      } else {
+        await message.reply(`Por favor, escolha uma das opções:\n\n${MAIN_MENU(first)}`)
+        startTimers(client, phone, customerName)
+      }
+    }
   }
 }
 
