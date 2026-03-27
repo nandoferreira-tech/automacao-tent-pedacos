@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Providers>
           {isHomolog && (
             <div className="fixed top-2 right-3 z-50 bg-yellow-400 text-yellow-900 text-[11px] font-bold px-2 py-0.5 rounded">
-              HOMOLOG
+              HOMOLOGAÇÃO
             </div>
           )}
           <Sidebar />
