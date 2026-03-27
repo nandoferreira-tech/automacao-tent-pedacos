@@ -1,88 +1,217 @@
 import type { WppClient, WppMessage } from '../adapters/types.js'
-import { processMessage } from '../agent/agentService.js'
+import { validateDeliveryAddress } from '../tools/addressService.js'
 import {
   formatAttendantNotification,
   formatOrderSummaryForBakery,
   formatPixInstructions,
 } from '../tools/pixService.js'
 import { db } from '../lib/db.js'
+import { humanize } from '../lib/llmHumanizer.js'
 
 const COMPANY_PHONE = process.env['COMPANY_PHONE'] ?? ''
 const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
+const SESSION_TIMEOUT_MIN = 15
 
-// Estado em memória: rastreamento de etapa por telefone
-const stageMap = new Map<string, string>()
+// ─── Menu data ───────────────────────────────────────────────────────────────
 
-// Cache do endereço salvo enquanto aguarda confirmação
-const savedAddressCache = new Map<string, string>()
+const POTE = [
+  { name: 'Bolo no Pote de Brigadeiro', price: 15 },
+  { name: 'Bolo no Pote de Cenoura com Chocolate', price: 15 },
+  { name: 'Bolo no Pote Red Velvet', price: 15 },
+  { name: 'Bolo no Pote Floresta Negra', price: 15 },
+]
 
-// Timers de inatividade por telefone
-const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>[]>()
+const TRADICIONAL = [
+  { name: 'Bolo de Cenoura', price: 25 },
+  { name: 'Bolo de Laranja', price: 25 },
+  { name: 'Bolo de Banana', price: 25 },
+  { name: 'Bolo de Maçã', price: 25 },
+  { name: 'Bolo de Limão', price: 25 },
+  { name: 'Bolo de Fubá', price: 25 },
+  { name: 'Bolo de Milho', price: 25 },
+  { name: 'Bolo Formigueiro', price: 25 },
+  { name: 'Bolo de Chocolate', price: 25 },
+  { name: 'Bolo de Maracujá', price: 25 },
+]
 
-const INACTIVITY_MSG_1 = (name: string) =>
-  `Oi, *${name}*! 😊 Ainda está aí? Não deixa seu bolinho esfriar não! 🎂\nÉ só me contar o que escolheu!`
+const ESPECIAL = [
+  { name: 'Bolo de Cenoura com gotas de Chocolate', price: 31 },
+  { name: 'Bolo de Fubá com pedaços de Goiabada', price: 31 },
+  { name: 'Bolo de Iogurte com Frutas Vermelhas', price: 43 },
+  { name: 'Bolo de Frutas Cristalizadas', price: 31 },
+  { name: 'Bolo de Paçoca', price: 31 },
+  { name: 'Bolo de Banana com Aveia', price: 43 },
+  { name: 'Bolo de Chocolate com Paçoca', price: 31 },
+  { name: 'Bolo de Leite em Pó', price: 50 },
+  { name: 'Bolo de Cenoura com Brigadeiro', price: 43 },
+  { name: 'Bolo de Banana com Doce de Leite', price: 33 },
+]
 
-const INACTIVITY_MSG_2 = (name: string) =>
-  `Psssiu... 🤫 Tô sentindo o cheirinho do bolo daqui, *${name}*! 😋\nVem cá completar seu pedido, não me deixa na mão! 🎂`
+const COBERTURAS = [
+  'Chocolate',
+  'Brigadeiro de Paçoca',
+  'Casquinha de Limão/Laranja',
+  'Brigadeiro Branco/Preto',
+  'Geléia de Goiaba',
+  'Beijinho',
+]
+const COBERTURA_PRICE = 8.75
 
-const INACTIVITY_MSG_CLOSE = (name: string) =>
-  `Tudo bem, *${name}*! Obrigada pelo contato! 💜\nVou encerrar nossa conversa por enquanto — é só chamar quando estiver pronta(o) para o seu bolinho! Até logo! 🎂`
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-function clearInactivityTimers(phone: string): void {
-  const timers = inactivityTimers.get(phone) ?? []
-  timers.forEach(clearTimeout)
-  inactivityTimers.delete(phone)
+interface OrderDraft {
+  productName: string | null
+  productPrice: number | null
+  coberturaName: string | null   // null = não aplicável (pote), 'sem cobertura' = recusou
+  coberturaPrice: number
+  deliveryType: 'entrega' | 'retirada' | null
+  address: string | null
+  mapsUrl: string | null
+  paymentMethod?: string
 }
 
-function setInactivityTimers(client: WppClient, phone: string, customerName: string): void {
-  clearInactivityTimers(phone)
-  const firstName = customerName.split(' ')[0] ?? customerName
+interface ConvCtx {
+  draft: OrderDraft
+  savedAddress: string | null
+}
+
+function emptyDraft(): OrderDraft {
+  return { productName: null, productPrice: null, coberturaName: null, coberturaPrice: 0, deliveryType: null, address: null, mapsUrl: null }
+}
+function emptyCtx(): ConvCtx { return { draft: emptyDraft(), savedAddress: null } }
+
+// ─── DB helpers ──────────────────────────────────────────────────────────────
+
+async function getConv(phone: string) {
+  return db.conversation.findUnique({ where: { phone } })
+}
+
+async function setState(phone: string, state: string, ctx?: ConvCtx): Promise<void> {
+  await db.conversation.upsert({
+    where: { phone },
+    create: { phone, state, context: JSON.stringify(ctx ?? emptyCtx()), history: '[]' },
+    update: { state, ...(ctx !== undefined ? { context: JSON.stringify(ctx) } : {}) },
+  })
+}
+
+async function getCtx(phone: string): Promise<ConvCtx> {
+  const conv = await getConv(phone)
+  if (!conv?.context || conv.context === '{}') return emptyCtx()
+  try { return JSON.parse(conv.context) as ConvCtx } catch { return emptyCtx() }
+}
+
+// ─── Inactivity timers ───────────────────────────────────────────────────────
+
+const timersMap = new Map<string, ReturnType<typeof setTimeout>[]>()
+
+function clearTimers(phone: string) {
+  const ts = timersMap.get(phone) ?? []
+  ts.forEach(clearTimeout)
+  timersMap.delete(phone)
+}
+
+function startTimers(client: WppClient, phone: string, name: string) {
+  clearTimers(phone)
+  const first = name.split(' ')[0] ?? name
 
   const t1 = setTimeout(async () => {
-    try { await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_1(firstName)) } catch { /* ignora */ }
+    try { await client.sendMessage(`${phone}@c.us`, `Oi, *${first}*! 😊 Ainda está aí? Não deixa seu bolinho esfriar não! 🎂\nÉ só me contar o que escolheu!`) } catch { /* ignore */ }
   }, 2 * 60 * 1000)
 
   const t2 = setTimeout(async () => {
-    try { await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_2(firstName)) } catch { /* ignora */ }
+    try { await client.sendMessage(`${phone}@c.us`, `Psssiu... 🤫 Tô sentindo o cheirinho do bolo daqui, *${first}*! 😋\nVem cá completar seu pedido, não me deixa na mão! 🎂`) } catch { /* ignore */ }
   }, 5 * 60 * 1000)
 
   const t3 = setTimeout(async () => {
     try {
-      await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_CLOSE(firstName))
-      stageMap.delete(phone)
-      await saveHistory(phone, [])
-    } catch { /* ignora */ }
+      await client.sendMessage(`${phone}@c.us`, `Tudo bem, *${first}*! Obrigada pelo contato! 💜\nVou encerrar nossa conversa por enquanto — é só chamar quando estiver pronta(o) para o seu bolinho! Até logo! 🎂`)
+      await setState(phone, 'main_menu', emptyCtx())
+    } catch { /* ignore */ }
+    timersMap.delete(phone)
   }, 10 * 60 * 1000)
 
-  inactivityTimers.set(phone, [t1, t2, t3])
+  timersMap.set(phone, [t1, t2, t3])
 }
 
-type HistoryEntry = { role: 'user' | 'model'; text: string }
+// ─── Message templates ───────────────────────────────────────────────────────
 
-// Estado em memória: quando a boleria enviou "2", aguardamos o motivo da recusa
+const MAIN_MENU = (firstName: string) =>
+  `O que posso fazer por você, *${firstName}*? É só digitar o número:\n\n` +
+  '1 - 🧁 Ver cardápio\n' +
+  '2 - 🛒 Fazer um pedido\n' +
+  '3 - 📦 Status do pedido\n' +
+  '4 - ⭐ Programa de fidelidade\n' +
+  '5 - 👩 Falar com atendente'
+
+const CATEGORY_MENU =
+  'Ótimo! Qual categoria você prefere?\n\n' +
+  '1 - 🍯 Bolos no Pote — R$ 15,00\n' +
+  '2 - 🎂 Bolos Artesanais Tradicionais — R$ 25,00\n' +
+  '3 - ✨ Bolos Artesanais Especiais — R$ 31,00 a R$ 50,00'
+
+const COBERTURA_MENU =
+  'Deseja adicionar uma cobertura? (+R$ 8,75) 😋\n\n' +
+  COBERTURAS.map((c, i) => `${i + 1} - ${c}`).join('\n') + '\n7 - Sem cobertura'
+
+const FULL_CARDAPIO =
+  '🎂 *Cardápio — Tentação em Pedaços*\n\n' +
+  '🍯 *Bolos no Pote* — R$ 15,00\n' +
+  POTE.map((p, i) => `  ${i + 1}. ${p.name}`).join('\n') + '\n\n' +
+  '🎂 *Bolos Artesanais Tradicionais* — R$ 25,00\n' +
+  '  + cobertura opcional: +R$ 8,75\n' +
+  TRADICIONAL.map((p, i) => `  ${i + 1}. ${p.name}`).join('\n') + '\n\n' +
+  '✨ *Bolos Artesanais Especiais*\n' +
+  ESPECIAL.map((p, i) => `  ${i + 1}. ${p.name} — R$ ${p.price.toFixed(2).replace('.', ',')}`).join('\n') + '\n\n' +
+  '🍰 *Coberturas disponíveis* (+R$ 8,75):\n' +
+  COBERTURAS.map(c => `  • ${c}`).join('\n')
+
+function deliveryTime(): Date {
+  const now = new Date()
+  if (now.getHours() < CUTOFF_HOUR) {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 17, 0, 0)
+  }
+  const tomorrow = new Date(now)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  return new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9, 0, 0)
+}
+
+function prazoLabel(dt: Date): string {
+  const now = new Date()
+  return dt.getDate() === now.getDate() ? 'hoje à tarde ☀️' : 'amanhã pela manhã 🌤️'
+}
+
+function buildSummaryAndPayment(draft: OrderDraft): string {
+  const dt = deliveryTime()
+  const total = (draft.productPrice ?? 0) + draft.coberturaPrice
+  const produto = draft.coberturaName && draft.coberturaName !== 'sem cobertura'
+    ? `${draft.productName} + Cobertura ${draft.coberturaName}`
+    : draft.productName ?? ''
+  const entrega = draft.deliveryType === 'entrega'
+    ? `📍 Entrega: ${draft.address}`
+    : '📍 Retirada na loja'
+  const tipo = draft.deliveryType === 'entrega' ? 'entrega' : 'retirada'
+  return [
+    '📋 *Resumo do seu pedido:*',
+    '',
+    `🎂 ${produto}`,
+    `💵 Total: R$ ${total.toFixed(2).replace('.', ',')}`,
+    entrega,
+    `⏰ Previsão: ${prazoLabel(dt)}`,
+    '',
+    'Confirma? Escolha a forma de pagamento:',
+    '',
+    '1 - 💰 Pix',
+    `2 - 💳 Cartão na ${tipo}`,
+    `3 - 💵 Dinheiro na ${tipo}`,
+  ].join('\n')
+}
+
+// ─── Pending refusal (bakery) ─────────────────────────────────────────────────
+
 let pendingRefusalOrderNumber: number | null = null
 
-async function loadHistory(phone: string): Promise<HistoryEntry[]> {
-  const conv = await db.conversation.findUnique({ where: { phone } })
-  if (!conv) return []
-  try {
-    return JSON.parse(conv.history) as HistoryEntry[]
-  } catch {
-    return []
-  }
-}
+// ─── Entry point ──────────────────────────────────────────────────────────────
 
-async function saveHistory(phone: string, history: HistoryEntry[]): Promise<void> {
-  await db.conversation.upsert({
-    where: { phone },
-    create: { phone, history: JSON.stringify(history) },
-    update: { history: JSON.stringify(history) },
-  })
-}
-
-/**
- * Ponto de entrada para todas as mensagens recebidas.
- */
 export async function handleMessage(client: WppClient, message: WppMessage): Promise<void> {
   const phone = message.from.replace('@c.us', '')
   const isCompany = phone === COMPANY_PHONE
@@ -97,204 +226,486 @@ export async function handleMessage(client: WppClient, message: WppMessage): Pro
     return
   }
 
-  await handleTextMessage(client, message, phone)
+  await handleText(client, message, phone)
 }
 
-/**
- * Mensagem de texto do cliente — processa via Gemini.
- */
-async function handleTextMessage(client: WppClient, message: WppMessage, phone: string): Promise<void> {
+// ─── Text message dispatcher ──────────────────────────────────────────────────
+
+async function handleText(client: WppClient, message: WppMessage, phone: string): Promise<void> {
   const text = message.body.trim()
-  const currentStage = stageMap.get(phone)
+  clearTimers(phone)
 
-  // Qualquer mensagem do cliente cancela os timers de inatividade
-  clearInactivityTimers(phone)
+  const conv = await getConv(phone)
+  const state = conv?.state ?? 'new'
+  const ctx = await getCtx(phone)
+  const customer = await db.customer.findUnique({ where: { phone } })
+  const customerName = customer?.name
 
-  // Etapa: aguardando o nome do cliente
-  if (currentStage === 'awaiting_name') {
-    const name = text
-    await db.customer.upsert({
-      where: { phone },
-      create: { phone, name },
-      update: { name },
-    })
-    stageMap.set(phone, 'main_menu')
-    const replyText =
-      `Prazer, *${name}*! 😊 O que posso fazer por você hoje? É só digitar o número:\n\n` +
-      '1 - 🧁 Ver cardápio\n' +
-      '2 - 🛒 Fazer um pedido\n' +
-      '3 - 📦 Status do pedido\n' +
-      '4 - ⭐ Programa de fidelidade\n' +
-      '5 - 👩 Falar com atendente'
-    await message.reply(replyText)
-    // Salva no histórico para o LLM ter contexto do nome já fornecido
-    const history = await loadHistory(phone)
-    history.push({ role: 'user', text: name })
-    history.push({ role: 'model', text: replyText })
-    await saveHistory(phone, history)
-    setInactivityTimers(client, phone, name)
-    return
-  }
-
-  // Primeira mensagem ou sem etapa definida — verifica se já conhecemos o cliente
-  if (!text || !currentStage) {
-    const existingCustomer = await db.customer.findUnique({ where: { phone } })
-    if (existingCustomer?.name) {
-      stageMap.set(phone, 'main_menu')
-      const replyText =
-        `Oi, *${existingCustomer.name}*! 😊 Seja bem-vindo(a) de volta à *Tentação em Pedaços*! Aqui é a Paty!\n\n` +
-        'O que posso fazer por você? É só digitar o número:\n\n' +
-        '1 - 🧁 Ver cardápio\n' +
-        '2 - 🛒 Fazer um pedido\n' +
-        '3 - 📦 Status do pedido\n' +
-        '4 - ⭐ Programa de fidelidade\n' +
-        '5 - 👩 Falar com atendente'
-      await message.reply(replyText)
-      // Salva no histórico para o LLM ter contexto do retorno
-      const history = await loadHistory(phone)
-      history.push({ role: 'user', text: text || 'Oi' })
-      history.push({ role: 'model', text: replyText })
-      await saveHistory(phone, history)
-      setInactivityTimers(client, phone, existingCustomer.name)
-    } else {
-      stageMap.set(phone, 'awaiting_name')
-      const welcomeText =
-        'Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\n' +
-        'Antes de tudo, pode me dizer seu *nome*? 😊'
-      await message.reply(welcomeText)
-      // Salva no histórico
-      const history = await loadHistory(phone)
-      history.push({ role: 'user', text: text || 'Oi' })
-      history.push({ role: 'model', text: welcomeText })
-      await saveHistory(phone, history)
-      setInactivityTimers(client, phone, 'você')
-    }
-    return
-  }
-
-  // Etapa: aguardando confirmação do endereço salvo
-  if (currentStage === 'address_confirm') {
-    const savedAddress = savedAddressCache.get(phone) ?? ''
-    const existingCustomer = await db.customer.findUnique({ where: { phone } })
-    const customerName = existingCustomer?.name ?? phone
-
-    if (text === '1') {
-      // Confirma endereço salvo — injeta na conversa e continua via LLM
-      const history = await loadHistory(phone)
-      const confirmedText = `Sim, pode entregar em ${savedAddress}`
-      savedAddressCache.delete(phone)
-      const response = await processMessage(phone, customerName, confirmedText, history, 'address')
-      if (response.stage) stageMap.set(phone, response.stage)
-      history.push({ role: 'user', text: confirmedText })
-      history.push({ role: 'model', text: response.text })
-      if (history.length > 20) history.splice(0, 2)
-      await saveHistory(phone, history)
-      await message.reply(response.text)
-      if (response.orderCreated) await notifyBakeryNewOrder(client, response.orderCreated.orderNumber)
-      if (response.stage !== 'done') setInactivityTimers(client, phone, customerName)
-      else clearInactivityTimers(phone)
+  // Timeout check: if mid-order and session expired → reset
+  if (state !== 'new' && state !== 'main_menu' && conv?.updatedAt) {
+    const minutesAgo = (Date.now() - conv.updatedAt.getTime()) / 60000
+    if (minutesAgo > SESSION_TIMEOUT_MIN) {
+      await setState(phone, 'main_menu', emptyCtx())
+      const first = customerName?.split(' ')[0] ?? 'você'
+      if (customerName) {
+        await message.reply(`Oi, *${first}*! 😊 Sua sessão anterior expirou por inatividade.\n\n${MAIN_MENU(first)}`)
+        startTimers(client, phone, customerName)
+      } else {
+        await setState(phone, 'awaiting_name', emptyCtx())
+        await message.reply('Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\nPode me dizer seu *nome*? 😊')
+      }
       return
     }
-
-    if (text === '2') {
-      // Cliente quer informar outro endereço
-      savedAddressCache.delete(phone)
-      stageMap.set(phone, 'address')
-      await message.reply('Sem problema! Me passa o endereço completo: rua, número e bairro. 😊')
-      setInactivityTimers(client, phone, customerName)
-      return
-    }
-
-    // Resposta inválida — repete a pergunta
-    const saved = savedAddressCache.get(phone) ?? ''
-    await message.reply(
-      `Não entendi! 😅 Você está no endereço *${saved}*?\n\n1 - ✅ Sim\n2 - 📝 Quero informar outro endereço`,
-    )
-    setInactivityTimers(client, phone, customerName)
-    return
   }
-
-  const history = await loadHistory(phone)
 
   try {
-    const contact = await message.getContact()
-    const customerNameFallback = contact.pushname || phone
-    const existingCustomer = await db.customer.findUnique({ where: { phone } })
-    const customerName = existingCustomer?.name || customerNameFallback
-
-    const response = await processMessage(phone, customerName, text, history, currentStage)
-
-    // Intercepta transição para "address": se cliente tem endereço salvo, sugere
-    if (response.stage === 'address' && existingCustomer?.lastAddress) {
-      const saved = existingCustomer.lastAddress
-      savedAddressCache.set(phone, saved)
-      stageMap.set(phone, 'address_confirm')
-      const suggestionText =
-        `Vi que você usou o endereço *${saved}* da última vez. Confirma a entrega aqui? 😊\n\n` +
-        '1 - ✅ Sim\n' +
-        '2 - 📝 Quero informar outro endereço'
-      history.push({ role: 'user', text })
-      history.push({ role: 'model', text: suggestionText })
-      if (history.length > 20) history.splice(0, 2)
-      await saveHistory(phone, history)
-      await message.reply(suggestionText)
-      setInactivityTimers(client, phone, customerName)
-      return
+    switch (state) {
+      case 'new':
+        await handleNew(client, message, phone, text, customerName)
+        break
+      case 'main_menu':
+        await handleMainMenu(client, message, phone, text, customerName)
+        break
+      case 'awaiting_name':
+        await handleAwaitingName(client, message, phone, text)
+        break
+      case 'category_select':
+        await handleCategorySelect(client, message, phone, text, ctx, customerName ?? phone)
+        break
+      case 'product_pote':
+        await handleProductPote(client, message, phone, text, ctx, customerName ?? phone)
+        break
+      case 'product_tradicional':
+        await handleProductTradicional(client, message, phone, text, ctx, customerName ?? phone)
+        break
+      case 'product_especial':
+        await handleProductEspecial(client, message, phone, text, ctx, customerName ?? phone)
+        break
+      case 'cobertura':
+        await handleCobertura(client, message, phone, text, ctx, customerName ?? phone, customer?.lastAddress ?? null)
+        break
+      case 'delivery_type':
+        await handleDeliveryType(client, message, phone, text, ctx, customer?.lastAddress ?? null)
+        break
+      case 'address_confirm':
+        await handleAddressConfirm(client, message, phone, text, ctx)
+        break
+      case 'address_input':
+        await handleAddressInput(client, message, phone, text, ctx)
+        break
+      case 'payment':
+        await handlePayment(client, message, phone, text, ctx, customerName ?? phone)
+        break
+      default:
+        await handleNew(client, message, phone, text, customerName)
     }
-
-    if (response.stage) {
-      stageMap.set(phone, response.stage)
-    }
-
-    history.push({ role: 'user', text })
-    history.push({ role: 'model', text: response.text })
-    if (history.length > 20) history.splice(0, 2)
-    await saveHistory(phone, history)
-
-    await message.reply(response.text)
-
-    if (response.orderCreated) {
-      await notifyBakeryNewOrder(client, response.orderCreated.orderNumber)
-    }
-
-    if (response.transferToAttendant) {
-      clearInactivityTimers(phone)
-      await notifyAttendant(client, phone, customerName, 'Cliente solicitou atendimento humano.')
-    } else if (response.stage === 'done') {
-      clearInactivityTimers(phone)
-    } else {
-      setInactivityTimers(client, phone, customerName)
-    }
-
   } catch (err) {
-    console.error(`[messageHandler] Erro ao processar mensagem de ${phone}:`, err)
-    clearInactivityTimers(phone)
-    stageMap.delete(phone)
-    await saveHistory(phone, [])
+    console.error(`[messageHandler] Erro de ${phone}:`, err)
+    await setState(phone, 'main_menu', emptyCtx())
+    clearTimers(phone)
+    const first = customerName?.split(' ')[0] ?? 'você'
     await message.reply(
-      'Opa, tive um probleminha técnico aqui! 😅\n\n' +
-      'Já reiniciei nossa conversa. O que posso fazer por você? É só digitar o número:\n\n' +
-      '1 - 🧁 Ver cardápio\n' +
-      '2 - 🛒 Fazer um pedido\n' +
-      '3 - 📦 Status do pedido\n' +
-      '4 - ⭐ Programa de fidelidade\n' +
-      '5 - 👩 Falar com atendente',
+      `Opa, tive um probleminha técnico! 😅 Reiniciei nossa conversa.\n\n${MAIN_MENU(first)}`
     )
   }
 }
 
-/**
- * Envia o resumo do novo pedido à boleria para aprovação.
- */
-async function notifyBakeryNewOrder(client: WppClient, orderNumber: number): Promise<void> {
-  if (!COMPANY_PHONE) return
+// ─── State handlers ───────────────────────────────────────────────────────────
 
+async function handleNew(client: WppClient, message: WppMessage, phone: string, text: string, customerName: string | undefined) {
+  if (!customerName) {
+    await setState(phone, 'awaiting_name', emptyCtx())
+    await message.reply('Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\nPode me dizer seu *nome*? 😊')
+    return
+  }
+  const first = customerName.split(' ')[0]!
+  await setState(phone, 'main_menu', emptyCtx())
+  const isGreeting = /^(oi|olá|ola|bom dia|boa tarde|boa noite|hey|hi|hello|e aí|e ai|tudo bem)/i.test(text)
+  const baseGreeting = isGreeting
+    ? `Oi, *${first}*! 😊 Seja bem-vindo(a) de volta à *Tentação em Pedaços*! Aqui é a Paty!\n\n`
+    : ''
+  const greeting = isGreeting ? await humanize(baseGreeting, `welcome back greeting for ${first}`) : ''
+  await message.reply(greeting + MAIN_MENU(first))
+  startTimers(client, phone, customerName)
+}
+
+async function handleMainMenu(client: WppClient, message: WppMessage, phone: string, text: string, customerName: string | undefined) {
+  if (!customerName) {
+    await setState(phone, 'awaiting_name', emptyCtx())
+    await message.reply('Pode me dizer seu *nome*? 😊')
+    return
+  }
+  const first = customerName.split(' ')[0]!
+
+  switch (text) {
+    case '1':
+      await message.reply(FULL_CARDAPIO)
+      startTimers(client, phone, customerName)
+      break
+    case '2':
+      await setState(phone, 'category_select', emptyCtx())
+      await message.reply(CATEGORY_MENU)
+      startTimers(client, phone, customerName)
+      break
+    case '3':
+      await handleStatusQuery(message, phone)
+      startTimers(client, phone, customerName)
+      break
+    case '4':
+      await message.reply('⭐ O programa de fidelidade está em desenvolvimento!\nEm breve você vai acumular pontos a cada pedido. 💜')
+      startTimers(client, phone, customerName)
+      break
+    case '5':
+      await message.reply('Claro! Vou chamar um atendente para você. 😊\n\nUm momento, por favor...')
+      clearTimers(phone)
+      if (COMPANY_PHONE) {
+        await client.sendMessage(`${COMPANY_PHONE}@c.us`, `🙋 *Atendimento solicitado*\n\nCliente: ${customerName} (${phone})\nMotivo: Solicitou atendimento humano`)
+      }
+      break
+    default:
+      await message.reply(`Por favor, escolha uma das opções:\n\n${MAIN_MENU(first)}`)
+      startTimers(client, phone, customerName)
+  }
+}
+
+async function handleAwaitingName(client: WppClient, message: WppMessage, phone: string, text: string) {
+  if (!text || text.length < 2) {
+    await message.reply('Pode me dizer seu *nome*, por favor? 😊')
+    return
+  }
+  const name = text.trim()
+  await db.customer.upsert({
+    where: { phone },
+    create: { phone, name },
+    update: { name },
+  })
+  await setState(phone, 'main_menu', emptyCtx())
+  const first = name.split(' ')[0]!
+  const prazerMsg = await humanize(`Prazer, *${first}*! 😊\n\n${MAIN_MENU(first)}`, `first welcome after name ${first}`)
+  await message.reply(prazerMsg)
+  startTimers(client, phone, name)
+}
+
+async function handleCategorySelect(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, name: string) {
+  switch (text) {
+    case '1':
+      await setState(phone, 'product_pote', ctx)
+      await message.reply('🍯 *Bolos no Pote* — R$ 15,00\n\n' + POTE.map((p, i) => `${i + 1} - ${p.name}`).join('\n'))
+      startTimers(client, phone, name)
+      break
+    case '2':
+      await setState(phone, 'product_tradicional', ctx)
+      await message.reply('🎂 *Bolos Artesanais Tradicionais* — R$ 25,00\n\n' + TRADICIONAL.map((p, i) => `${i + 1} - ${p.name}`).join('\n'))
+      startTimers(client, phone, name)
+      break
+    case '3':
+      await setState(phone, 'product_especial', ctx)
+      await message.reply('✨ *Bolos Artesanais Especiais*\n\n' + ESPECIAL.map((p, i) => `${i + 1} - ${p.name} — R$ ${p.price.toFixed(2).replace('.', ',')}`).join('\n'))
+      startTimers(client, phone, name)
+      break
+    default:
+      await message.reply('Por favor, escolha 1, 2 ou 3. 😊\n\n' + CATEGORY_MENU)
+      startTimers(client, phone, name)
+  }
+}
+
+async function handleProductPote(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, name: string) {
+  const idx = parseInt(text) - 1
+  const product = POTE[idx]
+  if (!product) {
+    await message.reply(`Por favor, escolha uma opção de 1 a ${POTE.length}. 😊`)
+    startTimers(client, phone, name)
+    return
+  }
+  ctx.draft.productName = product.name
+  ctx.draft.productPrice = product.price
+  ctx.draft.coberturaName = null  // pote não tem cobertura
+  ctx.draft.coberturaPrice = 0
+  const first = name.split(' ')[0]!
+  await setState(phone, 'delivery_type', ctx)
+  await message.reply(
+    `Boa escolha, *${first}*! 😋\n\n` +
+    `Como você prefere receber seu *${product.name}*?\n\n` +
+    '1 - 🏠 Entrega\n' +
+    '2 - 🏪 Retirada na loja'
+  )
+  startTimers(client, phone, name)
+}
+
+async function handleProductTradicional(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, name: string) {
+  const idx = parseInt(text) - 1
+  const product = TRADICIONAL[idx]
+  if (!product) {
+    await message.reply(`Por favor, escolha uma opção de 1 a ${TRADICIONAL.length}. 😊`)
+    startTimers(client, phone, name)
+    return
+  }
+  ctx.draft.productName = product.name
+  ctx.draft.productPrice = product.price
+  await setState(phone, 'cobertura', ctx)
+  await message.reply(`Boa escolha! 😋\n\n${COBERTURA_MENU}`)
+  startTimers(client, phone, name)
+}
+
+async function handleProductEspecial(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, name: string) {
+  const idx = parseInt(text) - 1
+  const product = ESPECIAL[idx]
+  if (!product) {
+    await message.reply(`Por favor, escolha uma opção de 1 a ${ESPECIAL.length}. 😊`)
+    startTimers(client, phone, name)
+    return
+  }
+  ctx.draft.productName = product.name
+  ctx.draft.productPrice = product.price
+  await setState(phone, 'cobertura', ctx)
+  await message.reply(`Boa escolha! 😋\n\n${COBERTURA_MENU}`)
+  startTimers(client, phone, name)
+}
+
+async function handleCobertura(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, name: string, savedAddress: string | null) {
+  const num = parseInt(text)
+  if (num === 7) {
+    ctx.draft.coberturaName = 'sem cobertura'
+    ctx.draft.coberturaPrice = 0
+  } else if (num >= 1 && num <= COBERTURAS.length) {
+    ctx.draft.coberturaName = COBERTURAS[num - 1]!
+    ctx.draft.coberturaPrice = COBERTURA_PRICE
+  } else {
+    await message.reply(`Por favor, escolha uma opção de 1 a 7. 😊\n\n${COBERTURA_MENU}`)
+    startTimers(client, phone, name)
+    return
+  }
+  const first = name.split(' ')[0]!
+  const produto = ctx.draft.coberturaName !== 'sem cobertura'
+    ? `${ctx.draft.productName} + Cobertura ${ctx.draft.coberturaName}`
+    : ctx.draft.productName ?? ''
+  await setState(phone, 'delivery_type', ctx)
+  await message.reply(
+    `Perfeito, *${first}*! 😋\n\n` +
+    `Como você prefere receber seu *${produto}*?\n\n` +
+    '1 - 🏠 Entrega\n' +
+    '2 - 🏪 Retirada na loja'
+  )
+  startTimers(client, phone, name)
+}
+
+async function handleDeliveryType(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, savedAddress: string | null) {
+  if (text === '1') {
+    // Entrega
+    if (savedAddress) {
+      ctx.savedAddress = savedAddress
+      await setState(phone, 'address_confirm', ctx)
+      await message.reply(
+        `Vi que você usou o endereço *${savedAddress}* da última vez. Confirma a entrega aqui? 😊\n\n` +
+        '1 - ✅ Sim\n' +
+        '2 - 📝 Quero informar outro endereço'
+      )
+    } else {
+      await setState(phone, 'address_input', ctx)
+      await message.reply('Me passa o endereço completo: rua, número e bairro. 😊')
+    }
+  } else if (text === '2') {
+    // Retirada
+    ctx.draft.deliveryType = 'retirada'
+    await setState(phone, 'payment', ctx)
+    await message.reply(
+      '📍 *Rua Padre Carvalho, 388*\nhttps://maps.google.com/?q=Rua+Padre+Carvalho,+388,+São+Paulo\n\n' +
+      buildSummaryAndPayment(ctx.draft)
+    )
+  } else {
+    await message.reply('Por favor, escolha:\n\n1 - 🏠 Entrega\n2 - 🏪 Retirada na loja')
+  }
+  const customerName = (await db.customer.findUnique({ where: { phone } }))?.name ?? phone
+  startTimers(client, phone, customerName)
+}
+
+async function handleAddressConfirm(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx) {
+  const customerName = (await db.customer.findUnique({ where: { phone } }))?.name ?? phone
+  if (text === '1') {
+    // Usa endereço salvo — mas ainda precisa validar (pode ter saído da área)
+    const saved = ctx.savedAddress ?? ''
+    const result = await validateDeliveryAddress(saved)
+    if (!result.valid && result.error !== 'Endereço não encontrado') {
+      // Fora da área
+      ctx.savedAddress = null
+      await setState(phone, 'delivery_type', ctx)
+      await message.reply(
+        `Que pena! 😔 O endereço *${result.formattedAddress}* está fora da nossa área de entrega (${result.distanceKm} km).\n\n` +
+        'Deseja informar outro endereço ou fazer retirada na loja?\n\n' +
+        '1 - 🏠 Outro endereço de entrega\n2 - 🏪 Retirada na loja'
+      )
+    } else {
+      ctx.draft.deliveryType = 'entrega'
+      ctx.draft.address = result.formattedAddress || saved
+      ctx.draft.mapsUrl = result.lat && result.lng ? `https://www.google.com/maps?q=${result.lat},${result.lng}` : null
+      await setState(phone, 'payment', ctx)
+      await message.reply(buildSummaryAndPayment(ctx.draft))
+    }
+    startTimers(client, phone, customerName)
+  } else if (text === '2') {
+    ctx.savedAddress = null
+    await setState(phone, 'address_input', ctx)
+    await message.reply('Me passa o endereço completo: rua, número e bairro. 😊')
+    startTimers(client, phone, customerName)
+  } else {
+    const saved = ctx.savedAddress ?? ''
+    await message.reply(`Não entendi! 😅\n\nVocê confirma a entrega em *${saved}*?\n\n1 - ✅ Sim\n2 - 📝 Outro endereço`)
+    startTimers(client, phone, customerName)
+  }
+}
+
+async function handleAddressInput(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx) {
+  const customerName = (await db.customer.findUnique({ where: { phone } }))?.name ?? phone
+  const result = await validateDeliveryAddress(text)
+
+  if (result.error === 'Endereço não encontrado') {
+    await message.reply('Hmm, não consegui localizar esse endereço no mapa. 🗺️\n\nPode conferir? Me passa a rua, número e bairro novamente. 😊')
+    startTimers(client, phone, customerName)
+    return
+  }
+
+  if (!result.valid) {
+    // Fora da área — oferecer retirada
+    ctx.savedAddress = null
+    await setState(phone, 'delivery_type', ctx)
+    await message.reply(
+      `Que pena! 😔 O endereço *${result.formattedAddress}* está fora da nossa área de entrega (${result.distanceKm} km da loja).\n\n` +
+      'Mas não precisa ficar sem seu bolinho! Você pode retirar na loja:\n' +
+      '📍 *Rua Padre Carvalho, 388*\nhttps://maps.google.com/?q=Rua+Padre+Carvalho,+388,+São+Paulo\n\n' +
+      'Deseja:\n1 - 🏠 Informar outro endereço\n2 - 🏪 Retirada na loja'
+    )
+    startTimers(client, phone, customerName)
+    return
+  }
+
+  ctx.draft.deliveryType = 'entrega'
+  ctx.draft.address = result.formattedAddress
+  ctx.draft.mapsUrl = result.lat && result.lng ? `https://www.google.com/maps?q=${result.lat},${result.lng}` : null
+  await setState(phone, 'payment', ctx)
+  await message.reply(
+    `✅ Ótimo! Entregamos em *${result.formattedAddress}* (${result.distanceKm} km da loja).\n\n` +
+    buildSummaryAndPayment(ctx.draft)
+  )
+  startTimers(client, phone, customerName)
+}
+
+async function handlePayment(client: WppClient, message: WppMessage, phone: string, text: string, ctx: ConvCtx, customerName: string) {
+  const tipo = ctx.draft.deliveryType === 'entrega' ? 'entrega' : 'retirada'
+  let paymentMethod: string
+  switch (text) {
+    case '1': paymentMethod = 'pix'; break
+    case '2': paymentMethod = `cartao_${tipo}`; break
+    case '3': paymentMethod = `dinheiro_${tipo}`; break
+    default:
+      await message.reply(`Por favor, escolha:\n\n1 - 💰 Pix\n2 - 💳 Cartão na ${tipo}\n3 - 💵 Dinheiro na ${tipo}`)
+      startTimers(client, phone, customerName)
+      return
+  }
+
+  // Create order
+  const dt = deliveryTime()
+  const total = (ctx.draft.productPrice ?? 0) + ctx.draft.coberturaPrice
+  const lastOrder = await db.order.findFirst({ orderBy: { orderNumber: 'desc' }, where: { orderNumber: { not: null } } })
+  const orderNumber = (lastOrder?.orderNumber ?? 0) + 1
+
+  await db.customer.upsert({
+    where: { phone },
+    create: { phone, name: customerName },
+    update: {},
+  })
+
+  // Resolve products
+  const productItems: { productName: string; unitPrice: number }[] = []
+  if (ctx.draft.productName) productItems.push({ productName: ctx.draft.productName, unitPrice: ctx.draft.productPrice ?? 0 })
+  if (ctx.draft.coberturaName && ctx.draft.coberturaName !== 'sem cobertura') {
+    productItems.push({ productName: `Cobertura ${ctx.draft.coberturaName}`, unitPrice: COBERTURA_PRICE })
+  }
+
+  const resolvedItems = await Promise.all(
+    productItems.map(async (item) => {
+      let product = await db.product.findFirst({ where: { name: { contains: item.productName } } })
+      if (!product) product = await db.product.create({ data: { name: item.productName, category: 'outros', price: item.unitPrice } })
+      return { productId: product.id, quantity: 1, unitPrice: item.unitPrice }
+    })
+  )
+
+  const order = await db.order.create({
+    data: {
+      customerPhone: phone,
+      customerName,
+      deliveryType: ctx.draft.deliveryType ?? 'retirada',
+      address: ctx.draft.address,
+      paymentMethod,
+      total,
+      orderNumber,
+      deliveryTime: dt,
+      status: 'aguardando_aprovacao',
+      items: { create: resolvedItems },
+    },
+  })
+
+  // Save last address
+  if (ctx.draft.deliveryType === 'entrega' && ctx.draft.address) {
+    await db.customer.update({ where: { phone }, data: { lastAddress: ctx.draft.address } })
+  }
+
+  const mapsUrl = ctx.draft.mapsUrl
+
+  // Reset conversation
+  await setState(phone, 'main_menu', emptyCtx())
+  clearTimers(phone)
+
+  await message.reply(
+    `🎂 *Pedido #${orderNumber} recebido!*\n\n` +
+    `💵 Total: R$ ${total.toFixed(2).replace('.', ',')}\n\n` +
+    'Estamos confirmando com a equipe. Em instantes você receberá a confirmação! 😊'
+  )
+
+  // Notify bakery
+  await notifyBakeryNewOrder(client, order.id, orderNumber, mapsUrl)
+}
+
+// ─── Status query ─────────────────────────────────────────────────────────────
+
+async function handleStatusQuery(message: WppMessage, phone: string) {
   const order = await db.order.findFirst({
-    where: { orderNumber },
+    where: { customerPhone: phone, status: { notIn: ['entregue', 'cancelado'] } },
+    orderBy: { createdAt: 'desc' },
+    include: { items: { include: { product: true } } },
+  })
+  if (!order?.orderNumber) {
+    await message.reply('Não encontrei nenhum pedido ativo no momento. 😊\n\nSe precisar de ajuda é só chamar!')
+    return
+  }
+  const statusLabel: Record<string, string> = {
+    aguardando_aprovacao: '⏳ Aguardando confirmação da equipe',
+    aguardando_pagamento: '💰 Aguardando pagamento Pix',
+    pago: '✅ Pagamento confirmado',
+    em_producao: '👩‍🍳 Em produção',
+    pronto: '✅ Pronto para retirada / saindo para entrega',
+    saiu_entrega: '🛵 Saiu para entrega',
+  }
+  const status = statusLabel[order.status] ?? order.status
+  const itemsText = order.items.map(i => i.product.name).join(', ')
+  const deliveryLabel = order.deliveryType === 'entrega' ? `Entrega: ${order.address}` : 'Retirada na loja'
+  await message.reply([
+    `📦 *Pedido #${order.orderNumber}*`,
+    `Status: ${status}`,
+    `Pedido: ${itemsText}`,
+    `Total: R$ ${order.total.toFixed(2).replace('.', ',')}`,
+    deliveryLabel,
+  ].join('\n'))
+}
+
+// ─── Bakery notification ──────────────────────────────────────────────────────
+
+async function notifyBakeryNewOrder(client: WppClient, orderId: string, orderNumber: number, mapsUrl: string | null): Promise<void> {
+  if (!COMPANY_PHONE) return
+  const order = await db.order.findFirst({
+    where: { id: orderId },
     include: { items: { include: { product: true } } },
   })
   if (!order) return
-
   const summary = formatOrderSummaryForBakery({
     orderNumber: order.orderNumber!,
     customerName: order.customerName,
@@ -304,69 +715,40 @@ async function notifyBakeryNewOrder(client: WppClient, orderNumber: number): Pro
     deliveryType: order.deliveryType,
     address: order.address,
     paymentMethod: order.paymentMethod,
+    mapsUrl: mapsUrl ?? undefined,
   })
-
   await client.sendMessage(`${COMPANY_PHONE}@c.us`, summary)
 }
 
-/**
- * Cliente enviou arquivo — trata como comprovante Pix.
- */
+// ─── Comprovante Pix ──────────────────────────────────────────────────────────
+
 async function handleComprovante(client: WppClient, message: WppMessage, phone: string): Promise<void> {
   const order = await db.order.findFirst({
-    where: {
-      customerPhone: phone,
-      paymentMethod: 'pix',
-      status: 'aguardando_pagamento',
-    },
+    where: { customerPhone: phone, paymentMethod: 'pix', status: 'aguardando_pagamento' },
     orderBy: { createdAt: 'desc' },
   })
-
   if (!order?.orderNumber) {
-    await message.reply(
-      'Não encontrei nenhum pedido aguardando pagamento. ' +
-      'Se precisar de ajuda, é só chamar! 😊',
-    )
+    await message.reply('Não encontrei nenhum pedido aguardando pagamento. Se precisar de ajuda, é só chamar! 😊')
     return
   }
-
   const orderId = String(order.orderNumber)
-  const notification = formatAttendantNotification(
-    phone,
-    order.customerName,
-    orderId,
-    Math.round(order.total * 100),
-  )
-
+  const notification = formatAttendantNotification(phone, order.customerName, orderId, Math.round(order.total * 100))
   const companyContact = `${COMPANY_PHONE}@c.us`
   await client.sendMessage(companyContact, notification)
-
   const media = await message.downloadMedia()
   if (media) {
-    await client.sendMessage(companyContact, media, {
-      caption: `Comprovante de ${order.customerName} (${phone}) — Pedido #${orderId}`,
-    })
+    await client.sendMessage(companyContact, media, { caption: `Comprovante de ${order.customerName} (${phone}) — Pedido #${orderId}` })
   }
-
-  await db.order.update({
-    where: { id: order.id },
-    data: { comprovanteStatus: 'pendente' },
-  })
-
-  await message.reply(
-    '✅ Comprovante recebido! Estamos validando seu pagamento.\n' +
-    'Em breve confirmaremos seu pedido. 🎂',
-  )
+  await db.order.update({ where: { id: order.id }, data: { comprovanteStatus: 'pendente' } })
+  await message.reply('✅ Comprovante recebido! Estamos validando seu pagamento.\nEm breve confirmaremos seu pedido. 🎂')
 }
 
-/**
- * Boleria enviou mensagem — pode ser aprovação/recusa de pedido ou confirmação de Pix.
- */
+// ─── Attendant commands (bakery side) ─────────────────────────────────────────
+
 async function handleAttendantCommand(client: WppClient, message: WppMessage): Promise<void> {
   const text = message.body.trim()
   const lower = text.toLowerCase()
 
-  // Se estava aguardando motivo da recusa, qualquer texto livre é o motivo
   if (pendingRefusalOrderNumber !== null) {
     const isCommand = /^(1|2|confirmar|recusar)\b/.test(lower)
     if (!isCommand) {
@@ -376,90 +758,80 @@ async function handleAttendantCommand(client: WppClient, message: WppMessage): P
     }
   }
 
-  // Aprovação do pedido
-  if (lower === '1') {
-    await acceptOrder(client)
-    return
-  }
+  if (lower === '1') { await acceptOrder(client); return }
 
-  // Início de recusa — pede motivo
   if (lower === '2') {
-    const order = await db.order.findFirst({
-      where: { status: 'aguardando_aprovacao' },
-      orderBy: { createdAt: 'asc' },
-    })
+    const order = await db.order.findFirst({ where: { status: 'aguardando_aprovacao' }, orderBy: { createdAt: 'asc' } })
     if (!order?.orderNumber) {
       await client.sendMessage(`${COMPANY_PHONE}@c.us`, 'Não há pedidos aguardando aprovação.')
       return
     }
     pendingRefusalOrderNumber = order.orderNumber
-    await client.sendMessage(
-      `${COMPANY_PHONE}@c.us`,
-      `Ok! Qual o motivo da recusa do Pedido *#${order.orderNumber}*?\nDigite o motivo na próxima mensagem.`,
-    )
+    await client.sendMessage(`${COMPANY_PHONE}@c.us`, `Ok! Qual o motivo da recusa do Pedido *#${order.orderNumber}*?\nDigite o motivo na próxima mensagem.`)
     return
   }
 
-  // Confirmação de comprovante Pix (fluxo existente)
+  // Reiniciar serviço via WhatsApp
+  const reiniciarMatch = lower.match(/^reiniciar\s+(\S+)/)
+  if (reiniciarMatch) {
+    const serviceId = reiniciarMatch[1] ?? ''
+    await handleRestartService(client, serviceId)
+    return
+  }
+
   const confirmMatch = lower.match(/^confirmar\s+(\S+)/)
-  const recusarMatch  = lower.match(/^recusar\s+(\S+)/)
-
-  if (confirmMatch) {
-    const orderId = confirmMatch[1] ?? ''
-    await confirmPixPayment(client, orderId)
-    return
-  }
-
-  if (recusarMatch) {
-    const orderId = recusarMatch[1] ?? ''
-    await refusePixPayment(client, orderId)
-    return
-  }
+  const recusarMatch = lower.match(/^recusar\s+(\S+)/)
+  if (confirmMatch) { await confirmPixPayment(client, confirmMatch[1] ?? ''); return }
+  if (recusarMatch) { await refusePixPayment(client, recusarMatch[1] ?? ''); return }
 }
 
-/**
- * Boleria aceitou o pedido mais antigo aguardando aprovação.
- */
-async function acceptOrder(client: WppClient): Promise<void> {
-  const order = await db.order.findFirst({
-    where: { status: 'aguardando_aprovacao' },
-    orderBy: { createdAt: 'asc' },
+async function handleRestartService(client: WppClient, serviceId: string): Promise<void> {
+  const { exec } = await import('child_process')
+  const RESTART_COMMANDS: Record<string, string> = {
+    'agente-prod':       'pm2 restart agente-prod',
+    'dashboard-prod':    'pm2 restart dashboard-prod',
+    'agente-homolog':    'pm2 restart agente-homolog',
+    'dashboard-homolog': 'pm2 restart dashboard-homolog',
+    'traefik':   'docker restart $(docker ps -q --filter "name=proxy_traefik")',
+    'postgres':  'docker restart $(docker ps -q --filter "name=netbox_postgres")',
+    'redis':     'docker restart $(docker ps -q --filter "name=netbox_redis")',
+  }
+  const cmd = RESTART_COMMANDS[serviceId]
+  if (!cmd) {
+    await client.sendMessage(`${COMPANY_PHONE}@c.us`, `❌ Serviço *${serviceId}* não encontrado ou não pode ser reiniciado.`)
+    return
+  }
+  await client.sendMessage(`${COMPANY_PHONE}@c.us`, `⏳ Reiniciando *${serviceId}*...`)
+  exec(cmd, async (err) => {
+    if (err) {
+      await client.sendMessage(`${COMPANY_PHONE}@c.us`, `❌ Erro ao reiniciar *${serviceId}*: ${err.message}`)
+    } else {
+      await client.sendMessage(`${COMPANY_PHONE}@c.us`, `✅ Serviço *${serviceId}* reiniciado com sucesso!`)
+    }
   })
+}
 
+async function acceptOrder(client: WppClient): Promise<void> {
+  const order = await db.order.findFirst({ where: { status: 'aguardando_aprovacao' }, orderBy: { createdAt: 'asc' } })
   if (!order?.orderNumber) {
     await client.sendMessage(`${COMPANY_PHONE}@c.us`, 'Não há pedidos aguardando aprovação.')
     return
   }
-
   const orderId = String(order.orderNumber)
 
   if (order.paymentMethod === 'pix') {
-    // Muda para aguardando pagamento e envia instruções Pix ao cliente
-    await db.order.update({
-      where: { id: order.id },
-      data: { status: 'aguardando_pagamento' },
-    })
-
+    await db.order.update({ where: { id: order.id }, data: { status: 'aguardando_pagamento' } })
     const pixMsg = formatPixInstructions(Math.round(order.total * 100), orderId)
     await client.sendMessage(
       `${order.customerPhone}@c.us`,
-      `✅ *Pedido #${orderId} confirmado!*\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`,
+      `✅ *Pedido #${orderId} confirmado!*\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`
     )
   } else {
-    // Cartão ou dinheiro na entrega — pedido entra em produção
-    await db.order.update({
-      where: { id: order.id },
-      data: { status: 'em_producao' },
-    })
-
+    await db.order.update({ where: { id: order.id }, data: { status: 'em_producao' } })
     const now = new Date()
-    const prazo = order.deliveryTime.getDate() === now.getDate()
-      ? 'hoje à tarde 🌤️'
-      : 'amanhã pela manhã ☀️'
-
-    const paymentLabel = order.paymentMethod === 'cartao_entrega' ? 'Cartão' : 'Dinheiro'
+    const prazo = order.deliveryTime.getDate() === now.getDate() ? 'hoje à tarde 🌤️' : 'amanhã pela manhã ☀️'
+    const paymentLabel = order.paymentMethod.startsWith('cartao') ? 'Cartão' : 'Dinheiro'
     const deliveryLabel = order.deliveryType === 'entrega' ? 'na entrega' : 'na retirada'
-
     await client.sendMessage(
       `${order.customerPhone}@c.us`,
       [
@@ -470,95 +842,33 @@ async function acceptOrder(client: WppClient): Promise<void> {
         `🕑 Previsão: ${prazo}`,
         '',
         'Muito obrigada por comprar na *Tentação em Pedaços*! Vai ser uma delícia! 🎂❤️',
-      ].join('\n'),
+      ].join('\n')
     )
   }
-
-  await client.sendMessage(`${COMPANY_PHONE}@c.us`, `✅ Pedido *#${orderId}* aceito!`)
+  await client.sendMessage(`${COMPANY_PHONE}@c.us`, `✅ Pedido *#${orderId}* aceito com sucesso!`)
 }
 
-/**
- * Boleria recusou o pedido com um motivo.
- */
-async function rejectOrderWithReason(
-  client: WppClient,
-  orderNumber: number,
-  reason: string,
-): Promise<void> {
+async function rejectOrderWithReason(client: WppClient, orderNumber: number, reason: string): Promise<void> {
   const order = await db.order.findFirst({ where: { orderNumber } })
-  if (!order) {
-    console.warn(`[pedido] Pedido #${orderNumber} não encontrado.`)
-    return
-  }
-
-  await db.order.update({
-    where: { id: order.id },
-    data: { status: 'cancelado', notaInterna: reason },
-  })
-
+  if (!order) return
+  await db.order.update({ where: { id: order.id }, data: { status: 'cancelado', notaInterna: reason } })
   await client.sendMessage(
     `${order.customerPhone}@c.us`,
-    `😔 Infelizmente não podemos confirmar o Pedido *#${orderNumber}* no momento.\n\n*Motivo:* ${reason}\n\nSe quiser fazer um novo pedido ou precisar de ajuda, é só chamar! 💜`,
+    `😔 Infelizmente não podemos confirmar o Pedido *#${orderNumber}* no momento.\n\n*Motivo:* ${reason}\n\nSe quiser fazer um novo pedido, é só chamar! 💜`
   )
-
   await client.sendMessage(`${COMPANY_PHONE}@c.us`, `❌ Pedido *#${orderNumber}* recusado. Cliente notificado.`)
 }
 
-/**
- * Boleria confirmou o comprovante Pix (fluxo existente).
- */
 async function confirmPixPayment(client: WppClient, orderId: string): Promise<void> {
-  const order = await db.order.findFirst({
-    where: { orderNumber: Number(orderId) },
-  })
-  if (!order) {
-    console.warn(`[pedido] Pedido #${orderId} não encontrado no banco.`)
-    return
-  }
-
-  await db.order.update({
-    where: { id: order.id },
-    data: { status: 'pago', comprovanteStatus: 'confirmado' },
-  })
-
-  await client.sendMessage(
-    `${order.customerPhone}@c.us`,
-    `✅ Pagamento do pedido *#${orderId}* confirmado! Seu pedido entrou na fila de produção. 🎂`,
-  )
+  const order = await db.order.findFirst({ where: { orderNumber: Number(orderId) } })
+  if (!order) return
+  await db.order.update({ where: { id: order.id }, data: { status: 'pago', comprovanteStatus: 'confirmado' } })
+  await client.sendMessage(`${order.customerPhone}@c.us`, `✅ Pagamento do pedido *#${orderId}* confirmado! Seu pedido entrou na fila de produção. 🎂`)
 }
 
-/**
- * Boleria recusou o comprovante Pix (fluxo existente).
- */
 async function refusePixPayment(client: WppClient, orderId: string): Promise<void> {
-  const order = await db.order.findFirst({
-    where: { orderNumber: Number(orderId) },
-  })
-  if (!order) {
-    console.warn(`[pedido] Pedido #${orderId} não encontrado no banco.`)
-    return
-  }
-
-  await db.order.update({
-    where: { id: order.id },
-    data: { status: 'aguardando_pagamento', comprovanteStatus: 'recusado' },
-  })
-
-  await client.sendMessage(
-    `${order.customerPhone}@c.us`,
-    `❌ Não conseguimos validar o comprovante do pedido *#${orderId}*.\n\nPor favor, envie novamente ou entre em contato com a gente. 😊`,
-  )
-}
-
-async function notifyAttendant(
-  client: WppClient,
-  customerPhone: string,
-  customerName: string,
-  reason: string,
-): Promise<void> {
-  if (!COMPANY_PHONE) return
-  await client.sendMessage(
-    `${COMPANY_PHONE}@c.us`,
-    `🙋 *Atendimento solicitado*\n\nCliente: ${customerName} (${customerPhone})\nMotivo: ${reason}`,
-  )
+  const order = await db.order.findFirst({ where: { orderNumber: Number(orderId) } })
+  if (!order) return
+  await db.order.update({ where: { id: order.id }, data: { status: 'aguardando_pagamento', comprovanteStatus: 'recusado' } })
+  await client.sendMessage(`${order.customerPhone}@c.us`, `❌ Não conseguimos validar o comprovante do pedido *#${orderId}*.\n\nPor favor, envie novamente ou entre em contato com a gente. 😊`)
 }

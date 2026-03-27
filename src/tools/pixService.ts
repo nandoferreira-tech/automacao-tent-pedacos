@@ -47,13 +47,14 @@ export function formatOrderSummaryForBakery(order: {
   deliveryType: string
   address: string | null
   paymentMethod: string
+  mapsUrl?: string
 }): string {
   const paymentLabel =
     order.paymentMethod === 'pix'
       ? 'Pix - confira o comprovante'
-      : order.paymentMethod === 'cartao_entrega'
-        ? 'Cartão na entrega'
-        : 'Dinheiro na entrega'
+      : order.paymentMethod.startsWith('cartao')
+        ? `Cartão na ${order.deliveryType === 'entrega' ? 'entrega' : 'retirada'}`
+        : `Dinheiro na ${order.deliveryType === 'entrega' ? 'entrega' : 'retirada'}`
 
   const deliveryLabel =
     order.deliveryType === 'entrega'
@@ -89,6 +90,7 @@ export function formatOrderSummaryForBakery(order: {
     `Pedido: ${pedidoDesc}`,
     `Total: ${totalStr}`,
     deliveryLabel,
+    ...(order.mapsUrl ? [`📍 Maps: ${order.mapsUrl}`] : []),
     `Pagamento: ${paymentLabel}`,
     '',
     '##############################',

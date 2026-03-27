@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { handleMessage } from './handlers/messageHandler.js'
 import { startInternalServer } from './server.js'
+import { startServiceMonitor } from './lib/serviceMonitor.js'
 
 const PROVIDER     = process.env['WHATSAPP_PROVIDER'] ?? 'wwebjs'
 const WPP_ENABLED  = process.env['WPP_ENABLED'] !== 'false'
@@ -21,4 +22,9 @@ if (!WPP_ENABLED) {
   // Padrão: whatsapp-web.js
   const { startWwebjsAdapter } = await import('./adapters/WwebjsAdapter.js')
   startWwebjsAdapter(internalPort, handleMessage)
+}
+
+// Inicia monitor de serviços (apenas quando WhatsApp está habilitado)
+if (WPP_ENABLED) {
+  startServiceMonitor()
 }

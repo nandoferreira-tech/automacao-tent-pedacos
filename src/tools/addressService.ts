@@ -33,6 +33,8 @@ export interface AddressValidationResult {
   valid: boolean
   distanceKm: number
   formattedAddress: string
+  lat?: number
+  lng?: number
   error?: string
 }
 
@@ -66,5 +68,7 @@ export async function validateDeliveryAddress(customerAddress: string): Promise<
     valid: distanceKm <= DELIVERY_RADIUS_KM,
     distanceKm,
     formattedAddress: customer.formattedAddress,
+    lat: customer.lat,
+    lng: customer.lng,
   }
 }

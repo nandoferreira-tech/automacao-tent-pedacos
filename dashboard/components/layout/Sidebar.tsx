@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation'
 import {
   Home, BarChart2, ShoppingBag, DollarSign,
   Star, Users, Megaphone, UtensilsCrossed, Settings, LogOut,
+  Server, GitBranch,
   type LucideIcon,
 } from 'lucide-react'
 import { logout } from '@/app/actions/auth'
@@ -38,6 +39,13 @@ const sections: NavSection[] = [
     items: [
       { href: '/cardapio',      label: 'Cardápios',    icon: UtensilsCrossed },
       { href: '/configuracoes', label: 'Configurações', icon: Settings, placeholder: true },
+    ],
+  },
+  {
+    title: 'Sistema',
+    items: [
+      { href: '/fluxos',   label: 'Fluxos',   icon: GitBranch },
+      { href: '/servidor', label: 'Servidor',  icon: Server },
     ],
   },
 ]
