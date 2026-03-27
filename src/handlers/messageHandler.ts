@@ -715,7 +715,7 @@ async function notifyBakeryNewOrder(client: WppClient, orderId: string, orderNum
     deliveryType: order.deliveryType,
     address: order.address,
     paymentMethod: order.paymentMethod,
-    mapsUrl: mapsUrl ?? undefined,
+    ...(mapsUrl != null ? { mapsUrl } : {}),
   })
   await client.sendMessage(`${COMPANY_PHONE}@c.us`, summary)
 }
