@@ -34,7 +34,7 @@ export const agentTools: Tool[] = [
             total:           { type: Type.NUMBER, description: 'Valor total do pedido em reais' },
             coberturaEscolhida: {
               type: Type.STRING,
-              description: 'Cobertura para Bolo Artesanal Tradicional. Use o nome exato ("Chocolate", "Brigadeiro de paçoca", "Casquinha de limão/Laranja", "Brigadeiro branco/preto", "Geléia de goiaba", "Beijinho"), ou "sem cobertura" se o cliente recusou, ou "nao_aplicavel" se o pedido não contém Bolos Artesanais Tradicionais.',
+              description: 'Cobertura para Bolos Artesanais Tradicionais ou Especiais. Use o nome exato ("Chocolate", "Brigadeiro de paçoca", "Casquinha de limão/Laranja", "Brigadeiro branco/preto", "Geléia de goiaba", "Beijinho"), ou "sem cobertura" se o cliente recusou, ou "nao_aplicavel" SOMENTE se o pedido contém apenas Bolos no Pote.',
             },
           },
           required: ['customerPhone', 'customerName', 'items', 'deliveryType', 'paymentMethod', 'total', 'coberturaEscolhida'],

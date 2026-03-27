@@ -19,6 +19,7 @@ const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
 
 export interface AgentResponse {
   text: string
+  stage?: string
   transferToAttendant?: boolean
   orderCreated?: { orderId: string; orderNumber: number; total: number; paymentMethod: string }
 }
@@ -31,7 +32,12 @@ export async function processMessage(
   customerName: string,
   incomingText: string,
   conversationHistory: Array<{ role: 'user' | 'model'; text: string }>,
+  currentStage?: string,
 ): Promise<AgentResponse> {
+
+  const stageContext = currentStage
+    ? `\n\n## Etapa atual: ${currentStage}\n`
+    : ''
 
   const contents = [
     ...conversationHistory.map((m) => ({
@@ -49,7 +55,7 @@ export async function processMessage(
     contents,
     config: {
       tools: agentTools,
-      systemInstruction: SYSTEM_PROMPT,
+      systemInstruction: SYSTEM_PROMPT + stageContext,
       temperature: 0.7,
       maxOutputTokens: 512,
     },
@@ -69,8 +75,14 @@ export async function processMessage(
     )
   }
 
-  const text = candidate.content?.parts?.find((p) => p.text)?.text ?? ''
-  return { text }
+  const rawText = candidate.content?.parts?.find((p) => p.text)?.text ?? ''
+
+  // Extract [STAGE:xxx] marker and remove it from text sent to client
+  const stageMatch = rawText.match(/\[STAGE:([a-z_]+)\]\s*$/)
+  const detectedStage = stageMatch?.[1]
+  const cleanText = rawText.replace(/\[STAGE:[a-z_]+\]\s*$/, '').trim()
+
+  return detectedStage ? { text: cleanText, stage: detectedStage } : { text: cleanText }
 }
 
 /**
@@ -97,9 +109,9 @@ async function handleToolCall(
         unitPrice: number
       }>
 
-      // Guard: se há Bolo Artesanal Tradicional (R$25) sem cobertura definida, recusa a criação
-      const temTradicional = items.some((i) => i.unitPrice === 25)
-      if (temTradicional && !coberturaEscolhida) {
+      // Guard: se há Bolo Artesanal Tradicional ou Especial (não Pote) sem cobertura definida, recusa a criação
+      const temArtesanal = items.some((i) => i.unitPrice !== 15)
+      if (temArtesanal && (!coberturaEscolhida || coberturaEscolhida === 'nao_aplicavel')) {
         return { text: 'Preciso confirmar a cobertura antes de registrar o pedido. Por favor, pergunte ao cliente sobre a cobertura.' }
       }
 
@@ -169,6 +181,14 @@ async function handleToolCall(
 
       const orderId = String(orderNumber)
 
+      // Salva o endereço de entrega para uso futuro
+      if (deliveryType === 'entrega' && address) {
+        await db.customer.update({
+          where: { phone: customerPhone },
+          data: { lastAddress: address },
+        })
+      }
+
       return {
         text: [
           `🎂 Pedido *#${orderId}* recebido!`,
@@ -211,7 +231,43 @@ async function handleToolCall(
     }
 
     case 'consultarStatus': {
-      return { text: 'Deixa eu verificar seu pedido... 🔍\n\n_Em breve essa função estará disponível!_' }
+      const order = await db.order.findFirst({
+        where: {
+          customerPhone,
+          status: { notIn: ['entregue', 'cancelado'] },
+        },
+        orderBy: { createdAt: 'desc' },
+        include: { items: { include: { product: true } } },
+      })
+
+      if (!order?.orderNumber) {
+        return { text: 'Não encontrei nenhum pedido ativo no momento. 😊\n\nSe precisar de ajuda é só chamar!' }
+      }
+
+      const statusLabel: Record<string, string> = {
+        aguardando_aprovacao: '⏳ Aguardando confirmação da equipe',
+        aguardando_pagamento: '💰 Aguardando pagamento Pix',
+        pago:                 '✅ Pagamento confirmado',
+        em_producao:          '👩‍🍳 Em produção',
+        pronto:               '✅ Pronto para retirada / saindo para entrega',
+        saiu_entrega:         '🛵 Saiu para entrega',
+      }
+
+      const status = statusLabel[order.status] ?? order.status
+      const itemsText = order.items.map((i) => i.product.name).join(', ')
+      const deliveryLabel = order.deliveryType === 'entrega'
+        ? `Entrega: ${order.address}`
+        : 'Retirada na loja'
+
+      return {
+        text: [
+          `📦 *Pedido #${order.orderNumber}*`,
+          `Status: ${status}`,
+          `Pedido: ${itemsText}`,
+          `Total: R$ ${order.total.toFixed(2).replace('.', ',')}`,
+          deliveryLabel,
+        ].join('\n'),
+      }
     }
 
     case 'consultarFidelidade': {

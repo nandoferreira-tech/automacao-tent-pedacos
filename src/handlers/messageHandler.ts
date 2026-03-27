@@ -10,6 +10,53 @@ import { db } from '../lib/db.js'
 const COMPANY_PHONE = process.env['COMPANY_PHONE'] ?? ''
 const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
 
+// Estado em memória: rastreamento de etapa por telefone
+const stageMap = new Map<string, string>()
+
+// Cache do endereço salvo enquanto aguarda confirmação
+const savedAddressCache = new Map<string, string>()
+
+// Timers de inatividade por telefone
+const inactivityTimers = new Map<string, ReturnType<typeof setTimeout>[]>()
+
+const INACTIVITY_MSG_1 = (name: string) =>
+  `Oi, *${name}*! 😊 Ainda está aí? Não deixa seu bolinho esfriar não! 🎂\nÉ só me contar o que escolheu!`
+
+const INACTIVITY_MSG_2 = (name: string) =>
+  `Psssiu... 🤫 Tô sentindo o cheirinho do bolo daqui, *${name}*! 😋\nVem cá completar seu pedido, não me deixa na mão! 🎂`
+
+const INACTIVITY_MSG_CLOSE = (name: string) =>
+  `Tudo bem, *${name}*! Obrigada pelo contato! 💜\nVou encerrar nossa conversa por enquanto — é só chamar quando estiver pronta(o) para o seu bolinho! Até logo! 🎂`
+
+function clearInactivityTimers(phone: string): void {
+  const timers = inactivityTimers.get(phone) ?? []
+  timers.forEach(clearTimeout)
+  inactivityTimers.delete(phone)
+}
+
+function setInactivityTimers(client: WppClient, phone: string, customerName: string): void {
+  clearInactivityTimers(phone)
+  const firstName = customerName.split(' ')[0] ?? customerName
+
+  const t1 = setTimeout(async () => {
+    try { await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_1(firstName)) } catch { /* ignora */ }
+  }, 2 * 60 * 1000)
+
+  const t2 = setTimeout(async () => {
+    try { await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_2(firstName)) } catch { /* ignora */ }
+  }, 5 * 60 * 1000)
+
+  const t3 = setTimeout(async () => {
+    try {
+      await client.sendMessage(`${phone}@c.us`, INACTIVITY_MSG_CLOSE(firstName))
+      stageMap.delete(phone)
+      await saveHistory(phone, [])
+    } catch { /* ignora */ }
+  }, 10 * 60 * 1000)
+
+  inactivityTimers.set(phone, [t1, t2, t3])
+}
+
 type HistoryEntry = { role: 'user' | 'model'; text: string }
 
 // Estado em memória: quando a boleria enviou "2", aguardamos o motivo da recusa
@@ -58,18 +105,97 @@ export async function handleMessage(client: WppClient, message: WppMessage): Pro
  */
 async function handleTextMessage(client: WppClient, message: WppMessage, phone: string): Promise<void> {
   const text = message.body.trim()
+  const currentStage = stageMap.get(phone)
 
-  // Mensagem vazia — cliente abriu a conversa sem digitar nada
-  if (!text) {
-    await message.reply(
-      'Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\n' +
-      'O que posso fazer por você? É só digitar o número:\n\n' +
+  // Qualquer mensagem do cliente cancela os timers de inatividade
+  clearInactivityTimers(phone)
+
+  // Etapa: aguardando o nome do cliente
+  if (currentStage === 'awaiting_name') {
+    const name = text
+    await db.customer.upsert({
+      where: { phone },
+      create: { phone, name },
+      update: { name },
+    })
+    stageMap.set(phone, 'main_menu')
+    const replyText =
+      `Prazer, *${name}*! 😊 O que posso fazer por você hoje? É só digitar o número:\n\n` +
       '1 - 🧁 Ver cardápio\n' +
       '2 - 🛒 Fazer um pedido\n' +
       '3 - 📦 Status do pedido\n' +
       '4 - ⭐ Programa de fidelidade\n' +
-      '5 - 👩 Falar com atendente',
+      '5 - 👩 Falar com atendente'
+    await message.reply(replyText)
+    setInactivityTimers(client, phone, name)
+    return
+  }
+
+  // Primeira mensagem ou sem etapa definida — verifica se já conhecemos o cliente
+  if (!text || !currentStage) {
+    const existingCustomer = await db.customer.findUnique({ where: { phone } })
+    if (existingCustomer?.name) {
+      stageMap.set(phone, 'main_menu')
+      const replyText =
+        `Oi, *${existingCustomer.name}*! 😊 Seja bem-vindo(a) de volta à *Tentação em Pedaços*! Aqui é a Paty!\n\n` +
+        'O que posso fazer por você? É só digitar o número:\n\n' +
+        '1 - 🧁 Ver cardápio\n' +
+        '2 - 🛒 Fazer um pedido\n' +
+        '3 - 📦 Status do pedido\n' +
+        '4 - ⭐ Programa de fidelidade\n' +
+        '5 - 👩 Falar com atendente'
+      await message.reply(replyText)
+      setInactivityTimers(client, phone, existingCustomer.name)
+    } else {
+      stageMap.set(phone, 'awaiting_name')
+      await message.reply(
+        'Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\n' +
+        'Antes de tudo, pode me dizer seu *nome*? 😊',
+      )
+      setInactivityTimers(client, phone, 'você')
+    }
+    return
+  }
+
+  // Etapa: aguardando confirmação do endereço salvo
+  if (currentStage === 'address_confirm') {
+    const savedAddress = savedAddressCache.get(phone) ?? ''
+    const existingCustomer = await db.customer.findUnique({ where: { phone } })
+    const customerName = existingCustomer?.name ?? phone
+
+    if (text === '1') {
+      // Confirma endereço salvo — injeta na conversa e continua via LLM
+      const history = await loadHistory(phone)
+      const confirmedText = `Sim, pode entregar em ${savedAddress}`
+      savedAddressCache.delete(phone)
+      const response = await processMessage(phone, customerName, confirmedText, history, 'address')
+      if (response.stage) stageMap.set(phone, response.stage)
+      history.push({ role: 'user', text: confirmedText })
+      history.push({ role: 'model', text: response.text })
+      if (history.length > 20) history.splice(0, 2)
+      await saveHistory(phone, history)
+      await message.reply(response.text)
+      if (response.orderCreated) await notifyBakeryNewOrder(client, response.orderCreated.orderNumber)
+      if (response.stage !== 'done') setInactivityTimers(client, phone, customerName)
+      else clearInactivityTimers(phone)
+      return
+    }
+
+    if (text === '2') {
+      // Cliente quer informar outro endereço
+      savedAddressCache.delete(phone)
+      stageMap.set(phone, 'address')
+      await message.reply('Sem problema! Me passa o endereço completo: rua, número e bairro. 😊')
+      setInactivityTimers(client, phone, customerName)
+      return
+    }
+
+    // Resposta inválida — repete a pergunta
+    const saved = savedAddressCache.get(phone) ?? ''
+    await message.reply(
+      `Não entendi! 😅 Você está no endereço *${saved}*?\n\n1 - ✅ Sim\n2 - 📝 Quero informar outro endereço`,
     )
+    setInactivityTimers(client, phone, customerName)
     return
   }
 
@@ -77,9 +203,33 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
 
   try {
     const contact = await message.getContact()
-    const customerName = contact.pushname || phone
+    const customerNameFallback = contact.pushname || phone
+    const existingCustomer = await db.customer.findUnique({ where: { phone } })
+    const customerName = existingCustomer?.name || customerNameFallback
 
-    const response = await processMessage(phone, customerName, text, history)
+    const response = await processMessage(phone, customerName, text, history, currentStage)
+
+    // Intercepta transição para "address": se cliente tem endereço salvo, sugere
+    if (response.stage === 'address' && existingCustomer?.lastAddress) {
+      const saved = existingCustomer.lastAddress
+      savedAddressCache.set(phone, saved)
+      stageMap.set(phone, 'address_confirm')
+      const suggestionText =
+        `Vi que você usou o endereço *${saved}* da última vez. Confirma a entrega aqui? 😊\n\n` +
+        '1 - ✅ Sim\n' +
+        '2 - 📝 Quero informar outro endereço'
+      history.push({ role: 'user', text })
+      history.push({ role: 'model', text: suggestionText })
+      if (history.length > 20) history.splice(0, 2)
+      await saveHistory(phone, history)
+      await message.reply(suggestionText)
+      setInactivityTimers(client, phone, customerName)
+      return
+    }
+
+    if (response.stage) {
+      stageMap.set(phone, response.stage)
+    }
 
     history.push({ role: 'user', text })
     history.push({ role: 'model', text: response.text })
@@ -93,11 +243,18 @@ async function handleTextMessage(client: WppClient, message: WppMessage, phone: 
     }
 
     if (response.transferToAttendant) {
+      clearInactivityTimers(phone)
       await notifyAttendant(client, phone, customerName, 'Cliente solicitou atendimento humano.')
+    } else if (response.stage === 'done') {
+      clearInactivityTimers(phone)
+    } else {
+      setInactivityTimers(client, phone, customerName)
     }
 
   } catch (err) {
     console.error(`[messageHandler] Erro ao processar mensagem de ${phone}:`, err)
+    clearInactivityTimers(phone)
+    stageMap.delete(phone)
     await saveHistory(phone, [])
     await message.reply(
       'Opa, tive um probleminha técnico aqui! 😅\n\n' +

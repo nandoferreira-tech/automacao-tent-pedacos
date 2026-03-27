@@ -23,8 +23,9 @@ model Customer {
   city       String?
   cep        String?
   howFound   String?
-  points     Int      @default(0)
-  createdAt  DateTime @default(now())
+  lastAddress  String?              // último endereço de entrega confirmado
+  points       Int      @default(0)
+  createdAt    DateTime @default(now())
 
   orders       Order[]
   loyaltyTxns  LoyaltyTransaction[]

@@ -50,30 +50,44 @@ export function formatOrderSummaryForBakery(order: {
 }): string {
   const paymentLabel =
     order.paymentMethod === 'pix'
-      ? 'Pix — aguarde o comprovante'
+      ? 'Pix - confira o comprovante'
       : order.paymentMethod === 'cartao_entrega'
         ? 'Cartão na entrega'
         : 'Dinheiro na entrega'
 
   const deliveryLabel =
-    order.deliveryType === 'entrega' ? `Entrega: ${order.address}` : 'Retirada na loja'
+    order.deliveryType === 'entrega'
+      ? `Entrega: ${order.address}`
+      : 'Retirada na loja'
 
-  const itemsText = order.items
-    .map(
-      (i) =>
-        `  • ${i.product.name} x${i.quantity} — R$ ${(i.unitPrice * i.quantity).toFixed(2).replace('.', ',')}`,
-    )
-    .join('\n')
+  // Build concise order description
+  const mainItems = order.items.filter((i) => !i.product.name.startsWith('Cobertura'))
+  const coberturaItem = order.items.find((i) => i.product.name.startsWith('Cobertura'))
 
-  const totalFormatted = order.total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+  const pedidoDesc = mainItems
+    .map((i) => (i.quantity > 1 ? `${i.quantity}x ${i.product.name}` : i.product.name))
+    .join(', ') + (coberturaItem ? ` + ${coberturaItem.product.name}` : '')
+
+  // Total breakdown
+  const mainTotal = mainItems.reduce((acc, i) => acc + i.unitPrice * i.quantity, 0)
+  const coberturaTotal = coberturaItem ? coberturaItem.unitPrice * coberturaItem.quantity : 0
+  const totalStr = coberturaTotal > 0
+    ? `R$ ${mainTotal.toFixed(2).replace('.', ',')} + R$ ${coberturaTotal.toFixed(2).replace('.', ',')} = R$ ${order.total.toFixed(2).replace('.', ',')}`
+    : `R$ ${order.total.toFixed(2).replace('.', ',')}`
+
+  // Format phone: 5511912345678 → 11 91234-5678
+  const rawPhone = order.customerPhone.replace(/\D/g, '').replace(/^55/, '')
+  const formattedPhone = rawPhone.length >= 10
+    ? rawPhone.replace(/^(\d{2})(\d{4,5})(\d{4})$/, '$1 $2-$3')
+    : rawPhone
 
   return [
     `### PEDIDO FEITO ## numero - ${order.orderNumber} ###`,
     '',
-    `Cliente: ${order.customerName} (${order.customerPhone})`,
-    `Pedido:`,
-    itemsText,
-    `Total: ${totalFormatted}`,
+    `Cliente: ${order.customerName}`,
+    `Telefone: ${formattedPhone}`,
+    `Pedido: ${pedidoDesc}`,
+    `Total: ${totalStr}`,
     deliveryLabel,
     `Pagamento: ${paymentLabel}`,
     '',
@@ -82,7 +96,8 @@ export function formatOrderSummaryForBakery(order: {
     'aceita pedido?',
     '1 - sim / 2 - não',
     '',
-    'caso não, informe o motivo na próxima mensagem',
+    'caso não',
+    'Digite a razão:',
   ].join('\n')
 }
 
