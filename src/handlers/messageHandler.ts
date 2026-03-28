@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import type { WppClient, WppMessage } from '../adapters/types.js'
+import { getWhatsAppClient } from '../server.js'
 import { validateDeliveryAddress } from '../tools/addressService.js'
 import {
   formatAttendantNotification,
@@ -903,7 +904,22 @@ async function handleRestartService(client: WppClient, serviceId: string): Promi
   })
 }
 
-async function acceptOrder(client: WppClient): Promise<void> {
+/** Normaliza o telefone para o formato esperado pelo WhatsApp (55 + número). */
+function normalizePhone(raw: string): string {
+  // Remove tudo que não é dígito
+  const digits = raw.replace(/\D/g, '')
+  // Se já tem 55 no início e tem 12-13 dígitos → está correto
+  if (digits.startsWith('55') && digits.length >= 12) return digits
+  // Se tem 10-11 dígitos → é DDD + número sem código de país → adiciona 55
+  if (digits.length >= 10 && digits.length <= 11) return `55${digits}`
+  // Qualquer outro caso: retorna como está (não destrói um número já incomum)
+  return digits
+}
+
+async function acceptOrder(passedClient: WppClient): Promise<void> {
+  // Usa o cliente global (sempre atualizado) em vez do capturado no message event
+  const client = getWhatsAppClient() ?? passedClient
+
   const order = await db.order.findFirst({ where: { status: 'aguardando_aprovacao' }, orderBy: { createdAt: 'asc' } })
   if (!order?.orderNumber) {
     await client.sendMessage(`${COMPANY_PHONE}@c.us`, 'Não há pedidos aguardando aprovação.')
@@ -911,13 +927,20 @@ async function acceptOrder(client: WppClient): Promise<void> {
   }
   const orderId = String(order.orderNumber)
 
+  // Normaliza o telefone antes de enviar (corrige números sem código de país)
+  const customerWaId = `${normalizePhone(order.customerPhone)}@c.us`
+  console.log(`[acceptOrder] Pedido #${orderId} | cliente: ${order.customerPhone} → WA: ${customerWaId}`)
+
   if (order.paymentMethod === 'pix') {
     await db.order.update({ where: { id: order.id }, data: { status: 'aguardando_pagamento' } })
     const pixMsg = formatPixInstructions(Math.round(order.total * 100), orderId)
-    await client.sendMessage(
-      `${order.customerPhone}@c.us`,
-      `✅ *Pedido #${orderId} confirmado!*\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`
-    )
+    try {
+      await client.sendMessage(customerWaId, `✅ *Pedido #${orderId} confirmado!*\n\n${pixMsg}\n\nMuito obrigada por comprar na *Tentação em Pedaços*! 🎂`)
+      console.log(`[acceptOrder] ✓ Pix instructions enviadas para ${customerWaId}`)
+    } catch (err) {
+      console.error(`[acceptOrder] ✗ Erro ao enviar Pix para ${customerWaId}:`, err)
+      await client.sendMessage(`${COMPANY_PHONE}@c.us`, `⚠️ Pedido *#${orderId}* confirmado, mas falha ao notificar cliente. WA: ${customerWaId}`)
+    }
   } else {
     await db.order.update({ where: { id: order.id }, data: { status: 'em_producao' } })
     const now = new Date()
@@ -938,10 +961,11 @@ async function acceptOrder(client: WppClient): Promise<void> {
       thanksLine,
     ].join('\n')
     try {
-      await client.sendMessage(`${order.customerPhone}@c.us`, confirmMsg)
+      await client.sendMessage(customerWaId, confirmMsg)
+      console.log(`[acceptOrder] ✓ Confirmação enviada para ${customerWaId}`)
     } catch (err) {
-      console.error(`[acceptOrder] Falha ao enviar confirmação ao cliente ${order.customerPhone}:`, err)
-      await client.sendMessage(`${COMPANY_PHONE}@c.us`, `⚠️ Pedido *#${orderId}* aceito, mas não foi possível notificar o cliente automaticamente. Telefone: ${order.customerPhone}`)
+      console.error(`[acceptOrder] ✗ Erro ao enviar confirmação para ${customerWaId}:`, err)
+      await client.sendMessage(`${COMPANY_PHONE}@c.us`, `⚠️ Pedido *#${orderId}* aceito, mas falha ao notificar cliente. WA: ${customerWaId}`)
     }
   }
   await client.sendMessage(`${COMPANY_PHONE}@c.us`, `✅ Pedido *#${orderId}* aceito com sucesso!`)
