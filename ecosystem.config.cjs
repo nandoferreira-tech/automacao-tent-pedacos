@@ -33,6 +33,9 @@ module.exports = {
       args: 'start -p 3000',
       cwd: '/srv/prod/agente-wpp/dashboard',
       env_file: '/srv/prod/agente-wpp/.env',
+      // Força caminho absoluto do banco — evita divergência com o agente
+      // (dashboard cwd é /dashboard/, agente cwd é /, DATABASE_URL relativo divergia)
+      env: { DATABASE_URL: 'file:/srv/prod/agente-wpp/prod.db' },
       autorestart: true,
       watch: false,
       max_memory_restart: '400M',
@@ -64,6 +67,7 @@ module.exports = {
       args: 'start -p 3100',
       cwd: '/srv/homolog/agente-wpp/dashboard',
       env_file: '/srv/homolog/agente-wpp/.env',
+      env: { DATABASE_URL: 'file:/srv/homolog/agente-wpp/homolog.db' },
       autorestart: true,
       watch: false,
       max_memory_restart: '400M',

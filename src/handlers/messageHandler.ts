@@ -245,7 +245,8 @@ let pendingRefusalOrderNumber: number | null = null
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export async function handleMessage(client: WppClient, message: WppMessage): Promise<void> {
-  const phone = message.from.replace('@c.us', '')
+  // Remove sufixo WA (@c.us, @lid, @s.whatsapp.net) e mantém só os dígitos
+  const phone = message.from.replace(/@[a-z.]+$/i, '')
   const isCompany = phone === COMPANY_PHONE
 
   if (isCompany) {
