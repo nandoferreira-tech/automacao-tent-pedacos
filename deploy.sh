@@ -124,7 +124,7 @@ services:
       - DEL_INSTANCE=false
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
-      - DATABASE_URL=postgresql://evolution:evolution2024@postgres:5432/evolution
+      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution2024@postgres:5432/evolution?schema=public
       - STORE_MESSAGES=true
       - STORE_MESSAGE_UP=true
       - STORE_CONTACTS=true
