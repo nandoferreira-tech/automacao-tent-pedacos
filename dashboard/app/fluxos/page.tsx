@@ -173,7 +173,13 @@ export default function FluxosPage() {
     queryFn: async () => {
       const r = await fetch('/api/fluxos/messages')
       if (!r.ok) return DEFAULT_MESSAGES
-      return r.json() as Promise<FlowMessage[]>
+      const data = await r.json() as FlowMessage[]
+      // Merge: usa mensagem salva se existir, senão mantém o DEFAULT
+      if (!data || data.length === 0) return DEFAULT_MESSAGES
+      return DEFAULT_MESSAGES.map(def => {
+        const saved = data.find(d => d.id === def.id)
+        return saved ? { ...def, message: saved.message } : def
+      })
     },
   })
 

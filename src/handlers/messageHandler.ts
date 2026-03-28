@@ -1,3 +1,6 @@
+import { readFileSync, existsSync } from 'fs'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import type { WppClient, WppMessage } from '../adapters/types.js'
 import { validateDeliveryAddress } from '../tools/addressService.js'
 import {
@@ -7,6 +10,32 @@ import {
 } from '../tools/pixService.js'
 import { db } from '../lib/db.js'
 import { humanize } from '../lib/llmHumanizer.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const FLOW_CONFIG_PATH = join(__dirname, '../../config/flow-messages.json')
+
+// ─── Live-editable flow config ────────────────────────────────────────────────
+// Dashboard writes to config/flow-messages.json; bot reads with 30 s cache.
+
+let _configCache: Map<string, string> | null = null
+let _configCacheTs = 0
+const CONFIG_CACHE_TTL = 30_000
+
+function getFlowMsg(id: string, fallback: string): string {
+  const now = Date.now()
+  if (!_configCache || now - _configCacheTs > CONFIG_CACHE_TTL) {
+    _configCache = new Map()
+    _configCacheTs = now
+    try {
+      if (existsSync(FLOW_CONFIG_PATH)) {
+        const raw = readFileSync(FLOW_CONFIG_PATH, 'utf-8')
+        const arr = JSON.parse(raw) as Array<{ id: string; message: string }>
+        arr.forEach(item => _configCache!.set(item.id, item.message))
+      }
+    } catch { /* usa fallback */ }
+  }
+  return _configCache.get(id) ?? fallback
+}
 
 const COMPANY_PHONE = process.env['COMPANY_PHONE'] ?? ''
 const CUTOFF_HOUR = Number(process.env['CUTOFF_HOUR'] ?? 11)
@@ -124,7 +153,8 @@ function startTimers(client: WppClient, phone: string, name: string) {
 
   const t3 = setTimeout(async () => {
     try {
-      await client.sendMessage(`${phone}@c.us`, `Tudo bem, *${first}*! Obrigada pelo contato! 💜\nVou encerrar nossa conversa por enquanto — é só chamar quando estiver pronta(o) para o seu bolinho! Até logo! 🎂`)
+      const timeoutTpl = getFlowMsg('timeout_close', 'Tudo bem, *{nome}*! Obrigada pelo contato! 💜\nVou encerrar nossa conversa por enquanto — é só chamar quando estiver pronta(o)! Até logo! 🎂')
+      await client.sendMessage(`${phone}@c.us`, timeoutTpl.replace('{nome}', first))
       await setState(phone, 'main_menu', emptyCtx())
     } catch { /* ignore */ }
     timersMap.delete(phone)
@@ -318,15 +348,15 @@ async function handleText(client: WppClient, message: WppMessage, phone: string)
 async function handleNew(client: WppClient, message: WppMessage, phone: string, text: string, customerName: string | undefined) {
   if (!customerName) {
     await setState(phone, 'awaiting_name', emptyCtx())
-    await message.reply('Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\nPode me dizer seu *nome*? 😊')
+    const newMsg = getFlowMsg('welcome_new', 'Oi! 😊 Seja bem-vindo(a) à *Tentação em Pedaços*! Aqui é a Paty, tô aqui pra te ajudar!\n\nPode me dizer seu *nome*? 😊')
+    await message.reply(newMsg)
     return
   }
   const first = customerName.split(' ')[0]!
   await setState(phone, 'main_menu', emptyCtx())
   const isGreeting = /^(oi|olá|ola|bom dia|boa tarde|boa noite|hey|hi|hello|e aí|e ai|tudo bem)/i.test(text)
-  const baseGreeting = isGreeting
-    ? `Oi, *${first}*! 😊 Seja bem-vindo(a) de volta à *Tentação em Pedaços*! Aqui é a Paty!\n\n`
-    : ''
+  const backTemplate = getFlowMsg('welcome_back', `Oi, *${first}*! 😊 Seja bem-vindo(a) de volta à *Tentação em Pedaços*! Aqui é a Paty!\n\n`)
+  const baseGreeting = isGreeting ? backTemplate.replace('{nome}', first) : ''
   const greeting = isGreeting ? await humanize(baseGreeting, `welcome back greeting for ${first}`) : ''
   await message.reply(greeting + MAIN_MENU(first))
   startTimers(client, phone, customerName)
@@ -362,7 +392,8 @@ async function handleMainMenu(client: WppClient, message: WppMessage, phone: str
     case '1':
     case '2': {
       await setState(phone, 'category_select', emptyCtx())
-      const catIntro = await humanize('Ótimo! Qual bolo você prefere? 😊', 'category menu intro')
+      const catBase = getFlowMsg('category_menu', 'Ótimo! Qual bolo você prefere? 😊')
+      const catIntro = await humanize(catBase, 'category menu intro')
       await message.reply(catIntro + '\n\n' + CATEGORY_ITEMS)
       startTimers(client, phone, customerName)
       break
@@ -551,14 +582,15 @@ async function handleDeliveryType(client: WppClient, message: WppMessage, phone:
     if (savedAddress) {
       ctx.savedAddress = savedAddress
       await setState(phone, 'address_confirm', ctx)
+      const confirmTpl = getFlowMsg('address_confirm', 'Vi que você usou o endereço *{endereço}* da última vez. Confirma a entrega aqui? 😊')
       await message.reply(
-        `Vi que você usou o endereço *${savedAddress}* da última vez. Confirma a entrega aqui? 😊\n\n` +
+        confirmTpl.replace('{endereço}', savedAddress) + '\n\n' +
         '1 - ✅ Sim\n' +
         '2 - 📝 Quero informar outro endereço'
       )
     } else {
       await setState(phone, 'address_input', ctx)
-      await message.reply('Me passa o endereço completo: rua, número e bairro. 😊')
+      await message.reply(getFlowMsg('address_input', 'Me passa o endereço completo: rua, número e bairro. 😊'))
     }
   } else if (text === '2') {
     // Retirada
@@ -603,7 +635,7 @@ async function handleAddressConfirm(client: WppClient, message: WppMessage, phon
   } else if (text === '2') {
     ctx.savedAddress = null
     await setState(phone, 'address_input', ctx)
-    await message.reply('Me passa o endereço completo: rua, número e bairro. 😊')
+    await message.reply(getFlowMsg('address_input', 'Me passa o endereço completo: rua, número e bairro. 😊'))
     startTimers(client, phone, customerName)
   } else {
     const saved = ctx.savedAddress ?? ''
@@ -893,7 +925,7 @@ async function acceptOrder(client: WppClient): Promise<void> {
     const paymentLabel = order.paymentMethod.startsWith('cartao') ? 'Cartão' : 'Dinheiro'
     const deliveryLabel = order.deliveryType === 'entrega' ? 'na entrega' : 'na retirada'
     const thanksLine = await humanize(
-      'Muito obrigada por comprar na *Tentação em Pedaços*! Já está saindo uma fornada quentinha pra você! 🎂❤️',
+      getFlowMsg('done', 'Muito obrigada por comprar na *Tentação em Pedaços*! Já está saindo uma fornada quentinha pra você! 🎂❤️'),
       `order confirmed thanks for ${order.customerName}`
     )
     const confirmMsg = [
