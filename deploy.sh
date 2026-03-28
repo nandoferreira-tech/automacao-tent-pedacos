@@ -86,14 +86,32 @@ EVOLUTION_DIR="/srv/evolution"
 mkdir -p "$EVOLUTION_DIR"
 
 cat > "$EVOLUTION_DIR/docker-compose.yml" << 'COMPOSE'
-version: '3.9'
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=evolution2024
+      - POSTGRES_DB=evolution
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   evolution-api:
     image: atendai/evolution-api:latest
     container_name: evolution-api
     restart: always
     ports:
       - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       - SERVER_TYPE=http
       - SERVER_PORT=8080
@@ -104,8 +122,9 @@ services:
       - LOG_COLOR=true
       - LOG_BAILEYS=error
       - DEL_INSTANCE=false
-      - DATABASE_ENABLED=false
+      - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
+      - DATABASE_URL=postgresql://evolution:evolution2024@postgres:5432/evolution
       - STORE_MESSAGES=true
       - STORE_MESSAGE_UP=true
       - STORE_CONTACTS=true
@@ -120,7 +139,9 @@ services:
     volumes:
       - evolution_instances:/evolution/instances
       - evolution_store:/evolution/store
+
 volumes:
+  postgres_data:
   evolution_instances:
   evolution_store:
 COMPOSE
