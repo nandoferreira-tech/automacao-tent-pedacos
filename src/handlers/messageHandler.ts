@@ -725,7 +725,7 @@ async function handlePayment(client: WppClient, message: WppMessage, phone: stri
 
   const order = await db.order.create({
     data: {
-      customerPhone: phone,
+      customerPhone: message.from, // preserva endereço WA completo (@c.us ou @lid) para resposta confiável
       customerName,
       deliveryType: ctx.draft.deliveryType ?? 'retirada',
       address: ctx.draft.address,
@@ -928,8 +928,10 @@ async function acceptOrder(passedClient: WppClient): Promise<void> {
   }
   const orderId = String(order.orderNumber)
 
-  // Normaliza o telefone antes de enviar (corrige números sem código de país)
-  const customerWaId = `${normalizePhone(order.customerPhone)}@c.us`
+  // Usa o endereço WA armazenado diretamente (pode ser @c.us ou @lid — ambos funcionam com sendMessage)
+  const customerWaId = order.customerPhone.includes('@')
+    ? order.customerPhone
+    : `${normalizePhone(order.customerPhone)}@c.us`
   console.log(`[acceptOrder] Pedido #${orderId} | cliente: ${order.customerPhone} → WA: ${customerWaId}`)
 
   if (order.paymentMethod === 'pix') {
