@@ -1,7 +1,62 @@
 'use client'
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { GitBranch, Pencil, Check, X, MessageSquare } from 'lucide-react'
+import { GitBranch, Pencil, Check, X, MessageSquare, AlertTriangle } from 'lucide-react'
+
+// ── WhatsApp preview renderer ─────────────────────────────────────────────────
+
+const VARS = ['{nome}', '{produto}', '{endereço}', '{numero}', '{total}']
+
+function renderWhatsAppText(text: string): React.ReactNode[] {
+  // Quebra em linhas, depois aplica bold/italic/variáveis
+  return text.split('\n').map((line, li) => {
+    const parts: React.ReactNode[] = []
+    let remaining = line
+    let key = 0
+
+    while (remaining.length > 0) {
+      // Variável {xxx}
+      const varMatch = remaining.match(/\{[^}]+\}/)
+      // Bold *texto*
+      const boldMatch = remaining.match(/\*([^*]+)\*/)
+      // Italic _texto_
+      const itMatch = remaining.match(/_([^_]+)_/)
+
+      const matches = [
+        varMatch  ? { idx: varMatch.index!,  len: varMatch[0].length,  type: 'var',  val: varMatch[0],  inner: varMatch[0] }  : null,
+        boldMatch ? { idx: boldMatch.index!, len: boldMatch[0].length, type: 'bold', val: boldMatch[0], inner: boldMatch[1]! } : null,
+        itMatch   ? { idx: itMatch.index!,   len: itMatch[0].length,   type: 'it',   val: itMatch[0],   inner: itMatch[1]! }  : null,
+      ].filter(Boolean).sort((a, b) => a!.idx - b!.idx)
+
+      const first = matches[0]
+      if (!first) { parts.push(<span key={key++}>{remaining}</span>); break }
+
+      if (first.idx > 0) parts.push(<span key={key++}>{remaining.slice(0, first.idx)}</span>)
+
+      if (first.type === 'var') {
+        const isKnown = VARS.includes(first.val)
+        parts.push(
+          <span key={key++} className={`inline-block px-1 rounded text-[9px] font-bold font-mono ${isKnown ? 'bg-purple-100 text-purple-700 border border-purple-300' : 'bg-red-100 text-red-700 border border-red-300'}`}>
+            {first.val}
+          </span>
+        )
+      } else if (first.type === 'bold') {
+        parts.push(<strong key={key++} className="font-bold">{first.inner}</strong>)
+      } else {
+        parts.push(<em key={key++}>{first.inner}</em>)
+      }
+
+      remaining = remaining.slice(first.idx + first.len)
+    }
+
+    return <span key={li}>{parts}{li < text.split('\n').length - 1 && <br />}</span>
+  })
+}
+
+function hasUnknownVars(text: string): boolean {
+  const matches = text.match(/\{[^}]+\}/g) ?? []
+  return matches.some(v => !VARS.includes(v))
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -341,44 +396,52 @@ export default function FluxosPage() {
                   <p style={{ fontSize: 9, color: '#64748b', marginBottom: 5, lineHeight: 1.3 }}>{msg.description}</p>
 
                   {isEditing ? (
-                    <textarea
-                      autoFocus
-                      value={editValue}
-                      onChange={e => setEditValue(e.target.value)}
-                      rows={5}
-                      style={{
-                        width: '100%',
-                        fontSize: 10,
-                        fontFamily: 'monospace',
-                        border: '1px solid ' + color.border,
-                        borderRadius: 5,
-                        padding: '5px 7px',
-                        resize: 'vertical',
-                        outline: 'none',
-                        background: 'white',
-                        color: '#1e293b',
-                        lineHeight: 1.4,
-                        boxSizing: 'border-box',
-                      }}
-                    />
+                    <>
+                      <textarea
+                        autoFocus
+                        value={editValue}
+                        onChange={e => setEditValue(e.target.value)}
+                        rows={5}
+                        style={{
+                          width: '100%',
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          border: '1px solid ' + color.border,
+                          borderRadius: 5,
+                          padding: '5px 7px',
+                          resize: 'vertical',
+                          outline: 'none',
+                          background: 'white',
+                          color: '#1e293b',
+                          lineHeight: 1.4,
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                      {hasUnknownVars(editValue) && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 4, fontSize: 9, color: '#dc2626' }}>
+                          <AlertTriangle size={9} />
+                          <span>Variável desconhecida detectada</span>
+                        </div>
+                      )}
+                      <div style={{ marginTop: 4, fontSize: 8, color: '#94a3b8' }}>
+                        Variáveis válidas: {VARS.join(' ')}
+                      </div>
+                    </>
                   ) : (
-                    <p style={{
+                    <div style={{
                       fontSize: 10,
                       color: '#374151',
                       background: 'rgba(255,255,255,0.7)',
                       border: '1px solid rgba(255,255,255,0.5)',
                       borderRadius: 5,
                       padding: '5px 7px',
-                      margin: 0,
                       lineHeight: 1.45,
-                      whiteSpace: 'pre-wrap',
                       wordBreak: 'break-word',
-                      fontFamily: 'monospace',
                       maxHeight: 56,
                       overflow: 'hidden',
                     }}>
-                      {msg.message}
-                    </p>
+                      {renderWhatsAppText(msg.message)}
+                    </div>
                   )}
                 </div>
               </div>

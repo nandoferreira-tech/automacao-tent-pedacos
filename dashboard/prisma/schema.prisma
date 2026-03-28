@@ -88,6 +88,20 @@ model LoyaltyTransaction {
   customer Customer @relation(fields: [phone], references: [phone])
 }
 
+// Histórico de mensagens do chat (para exibição no dashboard)
+model ChatMessage {
+  id        String   @id @default(cuid())
+  phone     String
+  name      String   @default("")
+  direction String   // "in" | "out"
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+  @@index([createdAt])
+}
+
 // Estado da conversa ativa
 model Conversation {
   phone     String   @id

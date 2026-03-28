@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation'
 import {
   Home, BarChart2, ShoppingBag, DollarSign,
   Star, Users, Megaphone, UtensilsCrossed, Settings, LogOut,
-  Server, GitBranch,
+  Server, GitBranch, MessageSquare,
   type LucideIcon,
 } from 'lucide-react'
 import { logout } from '@/app/actions/auth'
@@ -44,6 +44,7 @@ const sections: NavSection[] = [
   {
     title: 'Sistema',
     items: [
+      { href: '/chat',     label: 'Chat',     icon: MessageSquare },
       { href: '/fluxos',   label: 'Fluxos',   icon: GitBranch },
       { href: '/servidor', label: 'Servidor',  icon: Server },
     ],

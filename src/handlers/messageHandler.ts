@@ -283,6 +283,11 @@ async function handleText(client: WppClient, message: WppMessage, phone: string)
   const customer = await db.customer.findUnique({ where: { phone } })
   const customerName = customer?.name
 
+  // Persiste mensagem recebida no histórico de chat (não bloqueia o fluxo)
+  void db.chatMessage.create({
+    data: { phone, name: customerName ?? '', direction: 'in', body: text },
+  }).catch(() => {})
+
   // Timeout check: if mid-order and session expired → reset
   if (state !== 'new' && state !== 'main_menu' && conv?.updatedAt) {
     const minutesAgo = (Date.now() - conv.updatedAt.getTime()) / 60000

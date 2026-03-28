@@ -84,6 +84,7 @@ type EvolutionPayload = {
     message: Record<string, unknown>
     messageType: string
     pushName?: string
+    senderPn?: string  // v2.3.5+ — número real quando remoteJid é @lid
   }
 }
 
@@ -107,8 +108,17 @@ function parsePayload(payload: EvolutionPayload): WppMessage | null {
 
   const hasMedia = MEDIA_TYPES.some((t) => t in msg)
 
-  // Evolution usa @s.whatsapp.net; normalizamos para @c.us
-  const from = remoteJid.replace('@s.whatsapp.net', '@c.us')
+  // Resolve @lid → número real usando senderPn (Evolution API v2.3.5+)
+  const resolvedJid = remoteJid.endsWith('@lid') && payload.data.senderPn
+    ? `${payload.data.senderPn}@s.whatsapp.net`
+    : remoteJid
+
+  // Normaliza para @c.us (padrão do projeto)
+  const from = resolvedJid.replace('@s.whatsapp.net', '@c.us')
+
+  // Número real sem sufixo (para getContact)
+  const realNumber = resolvedJid.replace(/@[a-z.]+$/i, '')
+
   const client = createEvolutionClient()
 
   return {
@@ -121,7 +131,7 @@ function parsePayload(payload: EvolutionPayload): WppMessage | null {
     },
 
     async getContact() {
-      return { pushname: pushName, number: '' }
+      return { pushname: pushName, number: realNumber }
     },
 
     async downloadMedia(): Promise<WppMedia | null> {
