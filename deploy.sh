@@ -35,12 +35,12 @@ echo "  ✓ Homolog atualizado"
 echo ""
 echo "▶ [3/6] Instalando dependências e compilando..."
 cd "$PROD_DIR"
-npm ci --omit=dev --silent
+npm ci --silent
 npm run build
 echo "  ✓ Build do agente concluído"
 
 cd "$PROD_DIR/dashboard"
-npm ci --omit=dev --silent
+npm ci --silent
 npm run build
 echo "  ✓ Build do dashboard concluído"
 
