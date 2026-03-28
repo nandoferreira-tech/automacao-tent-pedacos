@@ -245,8 +245,17 @@ let pendingRefusalOrderNumber: number | null = null
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export async function handleMessage(client: WppClient, message: WppMessage): Promise<void> {
-  // Remove sufixo WA (@c.us, @lid, @s.whatsapp.net) e mantém só os dígitos
-  const phone = message.from.replace(/@[a-z.]+$/i, '')
+  // Resolve número real via getContact() — message.from pode retornar @lid em modo multi-device
+  // contact.number sempre retorna o telefone real (ex: 5511984380212)
+  let phone: string
+  try {
+    const contact = await message.getContact()
+    phone = contact.number && contact.number.length >= 10
+      ? contact.number
+      : message.from.replace(/@[a-z.]+$/i, '')
+  } catch {
+    phone = message.from.replace(/@[a-z.]+$/i, '')
+  }
   const isCompany = phone === COMPANY_PHONE
 
   if (isCompany) {
@@ -725,7 +734,7 @@ async function handlePayment(client: WppClient, message: WppMessage, phone: stri
 
   const order = await db.order.create({
     data: {
-      customerPhone: message.from, // preserva endereço WA completo (@c.us ou @lid) para resposta confiável
+      customerPhone: phone, // número real resolvido via getContact() — sem @lid
       customerName,
       deliveryType: ctx.draft.deliveryType ?? 'retirada',
       address: ctx.draft.address,
@@ -928,10 +937,7 @@ async function acceptOrder(passedClient: WppClient): Promise<void> {
   }
   const orderId = String(order.orderNumber)
 
-  // Usa o endereço WA armazenado diretamente (pode ser @c.us ou @lid — ambos funcionam com sendMessage)
-  const customerWaId = order.customerPhone.includes('@')
-    ? order.customerPhone
-    : `${normalizePhone(order.customerPhone)}@c.us`
+  const customerWaId = `${normalizePhone(order.customerPhone)}@c.us`
   console.log(`[acceptOrder] Pedido #${orderId} | cliente: ${order.customerPhone} → WA: ${customerWaId}`)
 
   if (order.paymentMethod === 'pix') {
