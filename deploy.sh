@@ -92,13 +92,13 @@ services:
     container_name: evolution-postgres
     restart: always
     environment:
-      - POSTGRES_USER=evolution
-      - POSTGRES_PASSWORD=evolution2024
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
       - POSTGRES_DB=evolution
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evolution"]
+      test: ["CMD-SHELL", "pg_isready -U user"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -124,7 +124,7 @@ services:
       - DEL_INSTANCE=false
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://evolution:evolution2024@postgres:5432/evolution?schema=public
+      - DATABASE_CONNECTION_URI=postgresql://user:pass@postgres:5432/evolution?schema=public
       - STORE_MESSAGES=true
       - STORE_MESSAGE_UP=true
       - STORE_CONTACTS=true
