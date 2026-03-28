@@ -105,6 +105,7 @@ services:
       - LOG_BAILEYS=error
       - DEL_INSTANCE=false
       - DATABASE_ENABLED=false
+      - DATABASE_PROVIDER=postgresql
       - STORE_MESSAGES=true
       - STORE_MESSAGE_UP=true
       - STORE_CONTACTS=true
