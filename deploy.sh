@@ -89,7 +89,7 @@ cat > "$EVOLUTION_DIR/docker-compose.yml" << 'COMPOSE'
 version: '3.9'
 services:
   evolution-api:
-    image: atendai/evolution-api:v2.3.7
+    image: atendai/evolution-api:latest
     container_name: evolution-api
     restart: always
     ports:
