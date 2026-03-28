@@ -121,7 +121,7 @@ function parsePayload(payload: EvolutionPayload): WppMessage | null {
     },
 
     async getContact() {
-      return { pushname: pushName }
+      return { pushname: pushName, number: '' }
     },
 
     async downloadMedia(): Promise<WppMedia | null> {

@@ -13,6 +13,8 @@ export interface WppMedia {
 
 export interface WppContact {
   pushname: string
+  /** Número real em formato internacional, ex: "5511984380212" (vazio se não resolvido) */
+  number: string
 }
 
 export interface WppMessage {

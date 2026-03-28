@@ -35,7 +35,7 @@ function adaptMessage(raw: pkg.Message, client: WppClient): WppMessage {
 
     async getContact() {
       const c = await raw.getContact()
-      return { pushname: c.pushname ?? '' }
+      return { pushname: c.pushname ?? '', number: (c as any).number ?? '' }
     },
 
     async downloadMedia() {
